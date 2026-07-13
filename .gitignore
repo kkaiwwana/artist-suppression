@@ -1,5 +1,6 @@
 datasets
 weights
+checkpoints
 logs
 outputs
 TestOut
