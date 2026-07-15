@@ -1,0 +1,56 @@
+_target_: src.model.unlearnable_gen.UnlearnableGenerationModel
+
+model_cfg:
+  generator:
+    _target_: src.model.gen.musicgen.MusicGen.from_pretrained
+    model_name_or_path: ${oc.env:MUSICGEN_MODEL,checkpoints/musicgen-small}
+    use_adapter: true
+    freeze_backbone: true
+    adapter_rank: 8
+    adapter_alpha: 8
+    adapter_activation: gelu
+    adapter_dropout: 0.0
+    adapter_zero_init: true
+    model_kwargs:
+      local_files_only: true
+    processor_kwargs:
+      local_files_only: true
+
+  # Override these dimensions if a MusicGen scale other than "small" is used.
+  concept_learner:
+    _target_: src.model.module.concept_learner.ConceptLearner
+    num_concepts: 10
+    hidden_dim: 1024
+    style_dim: 256
+    num_blocks: 24
+    text_feature_dim: 768
+    concept_name: artist
+    routing_mode: categorical
+    representation: fixed
+    intervention: additive
+    controller_dim: 512
+    depth_dim: 32
+    temperature: 1.0
+    initial_block_scale: 0.1
+
+  hook_blocks: null
+  intervention_scale: 1.0
+  suppression:
+    enabled: true
+    probability: 0.25
+    weight: 0.1
+    # Each suppressed sample is pushed above mean retain CE by this margin.
+    margin: 0.5
+    ensure_mixed_batch: true
+  test_generation:
+    do_sample: true
+    guidance_scale: 3.0
+    max_new_tokens: 512
+  losses:
+    generator_loss_weight: 1.0
+    router_weight: 1.0
+    style_bank_l2_weight: 0.0001
+    style_bank_kl_weight: 0.0
+    routing_loss_type: auto
+
+log_backend: swanlab

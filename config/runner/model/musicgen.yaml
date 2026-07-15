@@ -1,0 +1,24 @@
+_target_: src.model.base.BaseGenerationModel
+
+model_cfg:
+  generator:
+    _target_: src.model.gen.musicgen.MusicGen.from_pretrained
+    model_name_or_path: ${oc.env:MUSICGEN_MODEL,checkpoints/musicgen-small}
+    use_adapter: true
+    freeze_backbone: true
+    adapter_rank: 8
+    adapter_alpha: 8
+    adapter_activation: gelu
+    adapter_dropout: 0.0
+    adapter_zero_init: true
+    model_kwargs:
+      local_files_only: true
+    processor_kwargs:
+      local_files_only: true
+
+  test_generation:
+    do_sample: true
+    guidance_scale: 3.0
+    max_new_tokens: 512
+
+log_backend: swanlab

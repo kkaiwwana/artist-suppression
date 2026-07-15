@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - runner: train
+  - runner: train_gen
 
 exp:
   project: mus_unlearning_${runner.tags[0]}

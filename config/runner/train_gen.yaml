@@ -1,59 +1,53 @@
 defaults:
+  - model: musicgen
   - _self_
-  - dataset: TODO
-  - aug: TODO
-  - loss: TODO
-  - model: ifa
-  - metric:
-      - TODO
-      - TODO
-      - TODO
 
+# Dataset integration is intentionally left external at this stage.  The
+# Lightning model consumes the batch contract documented by MusciGen.
+dataset: null
+metrics: []
 
 loader:
-  # torch Dataloader zone
   train_loader_params:
-    batch_size: 6
-    num_workers: 6
+    batch_size: 2
+    num_workers: 4
     persistent_workers: True
     
   val_loader_params:
-    batch_size: 12
-    num_workers: 6
+    batch_size: 2
+    num_workers: 4
     persistent_workers: True
-
-  # customized keywords, should be removed if using regular loader
-  train_epoch_splits: 8
-  train_shuffle: true
 
 
 optimizer:
-  name: Adam
+  name: AdamW
   optimizer_params:
-    lr: 0.000006
+    lr: 0.0001
     weight_decay: 0
 
 
 scheduler:
   name: OneCycleLR
+  interval: step
+  frequency: 1
   scheduler_params:
-    div_factor: 6              # starts at lr / 10
-    pct_start: 0.0                                     # reaches lr at 30% of total steps
-    final_div_factor: 1                                # ends at lr / 10 / 10
-    # should addressing from runner level
-    max_lr: ${runner.optimizer.optimizer_params.lr}     
+    max_lr: ${runner.optimizer.optimizer_params.lr}
     epochs: ${runner.trainer.max_epochs}
-    steps_per_epoch: ???
+    # scripts/run.py may replace this after the datamodule is constructed.
+    steps_per_epoch: 1
+    div_factor: 10
+    pct_start: 0.1
+    final_div_factor: 10
     cycle_momentum: False
 
 
 trainer:
-  max_epochs: 200
-  log_every_n_steps: 50
+  max_epochs: 20
+  log_every_n_steps: 10
 
   num_nodes: 1
   devices: -1
-  precision: 32
+  precision: 16-mixed
 
   limit_train_batches: 1.0
   limit_val_batches: 1.0
@@ -63,4 +57,4 @@ trainer:
 
   accumulate_grad_batches: 1
 tags: 
-  - train
+  - train_gen
