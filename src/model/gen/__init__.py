@@ -5,11 +5,13 @@ from .musicgen import (
     HiddenStateHookContext,
     MusicGen,
     MusicGenOutput,
+    MusciGen,
 )
 
 __all__ = [
     "GenerationOutput",
     "HiddenStateHookContext",
     "MusicGen",
-    "MusicGenOutput"
+    "MusicGenOutput",
+    "MusciGen",
 ]

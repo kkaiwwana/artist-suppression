@@ -430,6 +430,14 @@ class MusicGen(nn.Module):
     # than merely inspect layer outputs.
     register_hidden_state_intervention = register_hidden_state_hook
 
+    def remove_hidden_state_hooks(self, handles: Sequence[Any]) -> None:
+        """Remove selected handles and forget them from the wrapper registry."""
+
+        for handle in handles:
+            handle.remove()
+            if handle in self._hidden_state_handles:
+                self._hidden_state_handles.remove(handle)
+
     def clear_hidden_state_hooks(self) -> None:
         """Remove all hooks registered through this wrapper."""
 
@@ -465,10 +473,7 @@ class MusicGen(nn.Module):
         try:
             yield captured
         finally:
-            for handle in handles:
-                handle.remove()
-                if handle in self._hidden_state_handles:
-                    self._hidden_state_handles.remove(handle)
+            self.remove_hidden_state_hooks(handles)
 
     @contextmanager
     def intervene_hidden_states(
@@ -488,10 +493,7 @@ class MusicGen(nn.Module):
         try:
             yield handles
         finally:
-            for handle in handles:
-                handle.remove()
-                if handle in self._hidden_state_handles:
-                    self._hidden_state_handles.remove(handle)
+            self.remove_hidden_state_hooks(handles)
 
     def register_concept_learner_hooks(
         self,
@@ -731,6 +733,42 @@ class MusicGen(nn.Module):
             return logits.sum() * 0.0
         return torch.stack(losses).mean()
 
+    def _compute_sample_losses(
+        self,
+        logits: Tensor,
+        labels: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Return per-sample and per-token MusicGen cross-entropy.
+
+        ``sample_losses`` has shape ``[B]`` and averages valid tokens inside
+        each codebook before averaging valid codebooks. ``token_losses`` has
+        shape ``[B, Q, T]`` and is zero at ignored/padding positions.  The
+        unreduced values allow an outer module to apply different objectives
+        to retain and suppression subsets without changing the base model's
+        ordinary scalar loss contract.
+        """
+
+        labels = labels.to(device=logits.device)
+        valid = labels.ne(-100)
+        if self.pad_token_id is not None:
+            valid &= labels.ne(self.pad_token_id)
+        safe_labels = labels.masked_fill(~valid, 0)
+        token_losses = F.cross_entropy(
+            logits.permute(0, 3, 1, 2).float(),
+            safe_labels,
+            reduction="none",
+        )
+        token_losses = token_losses * valid.to(dtype=token_losses.dtype)
+
+        valid_token_counts = valid.sum(dim=-1)
+        per_codebook = token_losses.sum(dim=-1) / valid_token_counts.clamp_min(1)
+        valid_codebooks = valid_token_counts.gt(0)
+        sample_losses = (
+            per_codebook.sum(dim=-1)
+            / valid_codebooks.sum(dim=-1).clamp_min(1)
+        )
+        return sample_losses, token_losses
+
     def _forward_prepared(
         self,
         payload: Dict[str, Any],
@@ -825,8 +863,14 @@ class MusicGen(nn.Module):
                 "training_step requires labels or audio_tokens so that the "
                 "MusicGen language-model loss can be computed"
             )
+        sample_losses, token_losses = self._compute_sample_losses(
+            output.logits,
+            output.labels,
+        )
         return {
             "loss": output.loss,
+            "sample_losses": sample_losses,
+            "token_losses": token_losses,
             "logits": output.logits,
             "labels": output.labels,
             "metrics": self._step_metrics(output),
@@ -850,8 +894,14 @@ class MusicGen(nn.Module):
                 "validation_step requires labels or audio_tokens so that the "
                 "MusicGen language-model loss can be computed"
             )
+        sample_losses, token_losses = self._compute_sample_losses(
+            output.logits,
+            output.labels,
+        )
         return {
             "loss": output.loss,
+            "sample_losses": sample_losses,
+            "token_losses": token_losses,
             "logits": output.logits,
             "labels": output.labels,
             "metrics": self._step_metrics(output),
@@ -911,4 +961,13 @@ class MusicGen(nn.Module):
 
 
 
-__all__ = ["GenerationOutput", "MusicGen", "MusicGenOutput", "HiddenStateHookContext"]
+# Backward compatibility for the spelling used in the initial project task.
+MusciGen = MusicGen
+
+__all__ = [
+    "GenerationOutput",
+    "HiddenStateHookContext",
+    "MusicGen",
+    "MusicGenOutput",
+    "MusciGen",
+]

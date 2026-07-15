@@ -228,6 +228,16 @@ def inject_attention_adapters(
             dropout=dropout,
             zero_init=zero_init,
         )
+        reference_parameter = next(attention.parameters(), None)
+        if reference_parameter is not None:
+            # Adapters are created after a pretrained model may already have
+            # been loaded in fp16/bf16 or placed on an accelerator.  Match the
+            # wrapped attention immediately so its first forward cannot mix
+            # devices or floating-point dtypes.
+            adapter = adapter.to(
+                device=reference_parameter.device,
+                dtype=reference_parameter.dtype,
+            )
         setattr(parent, child_name, AttentionOutputAdapter(attention, adapter))
 
     return [

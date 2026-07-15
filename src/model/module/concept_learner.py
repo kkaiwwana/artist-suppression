@@ -39,6 +39,8 @@ class ConceptCondition:
         router_logits: Unmasked router logits used for supervision.  It is
             ``None`` for teacher-forced ids and manually supplied weights.
         availability_mask: Final mask applied before style-bank synthesis.
+        suppression_mask: Boolean ``[batch]`` mask.  In additive mode a true
+            row subtracts, rather than adds, its routed style residual.
     """
 
     style: Tensor
@@ -46,6 +48,7 @@ class ConceptCondition:
     active: Tensor
     router_logits: Optional[Tensor] = None
     availability_mask: Optional[Tensor] = None
+    suppression_mask: Optional[Tensor] = None
 
 
 class ConceptStyleBank(nn.Module):
@@ -581,6 +584,7 @@ class ConceptLearner(nn.Module):
         concept_weights: Optional[Tensor] = None,
         available_concept_mask: Optional[Tensor] = None,
         forgotten_concept_ids: Optional[ConceptIds] = None,
+        suppression_mask: Optional[Tensor] = None,
         temperature: Optional[float] = None,
         renormalize_weights: Optional[bool] = None,
         sample_style: Optional[bool] = None,
@@ -664,6 +668,25 @@ class ConceptLearner(nn.Module):
         )
         availability = availability.to(device=weights.device)
         active = (weights.sum(dim=-1) > 0).to(dtype=weights.dtype)
+        if suppression_mask is None:
+            prepared_suppression_mask = torch.zeros(
+                batch_size,
+                device=weights.device,
+                dtype=torch.bool,
+            )
+        else:
+            prepared_suppression_mask = torch.as_tensor(
+                suppression_mask,
+                device=weights.device,
+            ).bool()
+            if prepared_suppression_mask.ndim == 0:
+                prepared_suppression_mask = prepared_suppression_mask.expand(
+                    batch_size
+                )
+            if prepared_suppression_mask.shape != (batch_size,):
+                raise ValueError(
+                    "suppression_mask must be scalar or have shape [batch]"
+                )
 
         if sample_style is None and self.style_bank.representation == "gaussian":
             sample_style = self.training and self.sample_gaussian_during_training
@@ -674,6 +697,7 @@ class ConceptLearner(nn.Module):
             active=active,
             router_logits=router_logits,
             availability_mask=availability,
+            suppression_mask=prepared_suppression_mask,
         )
 
     @staticmethod
@@ -685,8 +709,21 @@ class ConceptLearner(nn.Module):
         )
         if scale_tensor.ndim == 0:
             return scale_tensor
-        if scale_tensor.ndim != 1 or scale_tensor.shape[0] != hidden_state.shape[0]:
+        if scale_tensor.ndim != 1:
             raise ValueError("intervention_scale must be scalar or have shape [batch]")
+        if scale_tensor.shape[0] != hidden_state.shape[0]:
+            if hidden_state.shape[0] % scale_tensor.shape[0] != 0:
+                raise ValueError(
+                    "intervention_scale batch must match or evenly divide the "
+                    "hidden-state batch"
+                )
+            # Generation with classifier-free guidance concatenates multiple
+            # copies of the decoder batch.  Preserve the original batch order
+            # in every copy rather than forcing the caller to know this HF
+            # implementation detail.
+            scale_tensor = scale_tensor.repeat(
+                hidden_state.shape[0] // scale_tensor.shape[0]
+            )
         shape = (hidden_state.shape[0],) + (1,) * (hidden_state.ndim - 1)
         return scale_tensor.view(shape)
 
@@ -752,14 +789,30 @@ class ConceptLearner(nn.Module):
 
         style = condition.style
         active = condition.active
+        suppression_mask = condition.suppression_mask
+        if suppression_mask is None:
+            suppression_mask = torch.zeros(
+                style.shape[0],
+                device=style.device,
+                dtype=torch.bool,
+            )
         if style.shape[0] == 1 and hidden_state.shape[0] != 1:
             style = style.expand(hidden_state.shape[0], -1)
             active = active.expand(hidden_state.shape[0])
+            suppression_mask = suppression_mask.expand(hidden_state.shape[0])
         elif style.shape[0] != hidden_state.shape[0]:
-            raise ValueError("condition batch size must match hidden_state batch size")
+            if hidden_state.shape[0] % style.shape[0] != 0:
+                raise ValueError(
+                    "condition batch must match or evenly divide the hidden-state batch"
+                )
+            repeats = hidden_state.shape[0] // style.shape[0]
+            style = style.repeat(repeats, 1)
+            active = active.repeat(repeats)
+            suppression_mask = suppression_mask.repeat(repeats)
 
         style = style.to(device=hidden_state.device, dtype=hidden_state.dtype)
         active = active.to(device=hidden_state.device, dtype=hidden_state.dtype)
+        suppression_mask = suppression_mask.to(device=hidden_state.device)
         depth = self.depth_embeddings.weight[block_index].to(
             device=hidden_state.device,
             dtype=hidden_state.dtype,
@@ -782,7 +835,12 @@ class ConceptLearner(nn.Module):
         active = active.view(active_shape)
         if self.style_predictor is None:
             predicted_style_residual = torch.zeros_like(style_residual)
-            intervention_residual = active * style_residual
+            direction = torch.where(
+                suppression_mask,
+                hidden_state.new_tensor(-1.0),
+                hidden_state.new_tensor(1.0),
+            ).view(active_shape)
+            intervention_residual = active * direction * style_residual
         else:
             predicted_style_residual = self.style_predictor(hidden_state, depth)
             # With no available concept, replacement still removes the
