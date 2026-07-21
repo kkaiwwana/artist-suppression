@@ -69,7 +69,8 @@ class BaseGenerationModel(pl.LightningModule):
         cfg: The full composed Hydra config, retained for downstream use.
         sync_logger: Optional pre-created :class:`WanbSyncLogger`, useful in
             tests or custom launchers.
-        log_backend: ``"swanlab"`` or ``"wandb"``.
+        log_backend: Legacy fallback backend used only with an explicitly
+            supplied ``sync_logger``. Normal training uses Lightning's logger.
     """
 
     TEST_TEXT_KEYS = (
@@ -89,7 +90,7 @@ class BaseGenerationModel(pl.LightningModule):
         scheduler_cfg: Optional[Any] = None,
         cfg: Optional[Any] = None,
         sync_logger: Optional[WanbSyncLogger] = None,
-        log_backend: str = "swanlab",
+        log_backend: str = "wandb",
     ) -> None:
         super().__init__()
         self.model_cfg = model_cfg
@@ -143,27 +144,61 @@ class BaseGenerationModel(pl.LightningModule):
         loss_dict: Mapping[str, Tensor],
         *,
         stage: str,
+        batch_size: int,
     ) -> None:
-        if self._sync_logger is None:
-            return
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive when logging losses")
         on_step = stage == "train"
-        payload = {f"{stage}-losses/overall": total_loss.detach()}
-        payload.update(
-            {
-                f"{stage}-losses/{name}": value.detach()
-                for name, value in loss_dict.items()
-            }
-        )
+        payload = {f"{stage}/loss_total": total_loss.detach().float().clone()}
+        for name, value in loss_dict.items():
+            if name.endswith("_monitor"):
+                # Put diagnostics in their own top-level W&B section. Using
+                # ``train/monitor_*`` made W&B place dozens of per-block
+                # diagnostics beside the actual training-loss panels.
+                metric_name = (
+                    f"monitor/{stage}/{name.removesuffix('_monitor')}"
+                )
+            elif name.startswith("branch_"):
+                metric_name = f"{stage}/{name}"
+            else:
+                metric_name = f"{stage}/loss_{name}"
+            payload[metric_name] = value.detach().float().clone()
         trainer = getattr(self, "_trainer", None)
-        step = trainer.global_step if trainer is not None else None
-        self._sync_logger.log(
-            payload,
-            on_step=on_step,
-            on_epoch=True,
-            step=step,
-        )
-        if stage == "train":
-            self._sync_logger.add_step()
+        if trainer is not None:
+            self.log_dict(
+                payload,
+                on_step=on_step,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+                batch_size=batch_size,
+            )
+            # Stable checkpoint/progress aliases; detailed curves remain under
+            # the grouped W&B names above.
+            if stage == "val":
+                self.log(
+                    "val_loss",
+                    total_loss.detach(),
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                    batch_size=batch_size,
+                )
+            return
+
+        # Legacy/test fallback when no Lightning Trainer owns logging.
+        if self._sync_logger is not None:
+            self._sync_logger.log(
+                payload,
+                on_step=on_step,
+                on_epoch=True,
+                step=None,
+            )
+            if stage == "train":
+                self._sync_logger.add_step()
 
     def _shared_step(
         self,
@@ -182,6 +217,9 @@ class BaseGenerationModel(pl.LightningModule):
             total_loss,
             {"musicgen_lm": result["loss"]},
             stage=stage,
+            batch_size=int(result["sample_losses"].shape[0])
+            if isinstance(result.get("sample_losses"), Tensor)
+            else int(len(batch.get("text", [])) or 1),
         )
         return total_loss, result
 
@@ -254,6 +292,53 @@ class BaseGenerationModel(pl.LightningModule):
         return output
 
     @torch.no_grad()
+    def generate_validation_samples(
+        self,
+        batch: Mapping[str, Any],
+        *,
+        generation_kwargs: Optional[Mapping[str, Any]] = None,
+        generation_seed: int = 42,
+    ) -> Dict[str, Any]:
+        """Decode fixed references and generate default samples for monitoring.
+
+        This is the adapter-only counterpart to the explicit controller's
+        multi-branch comparison. It deliberately evaluates only the ordinary
+        no-control path, so W&B can expose teacher-forcing/free-generation
+        divergence during dataset adaptation.
+        """
+
+        audio_tokens = batch.get("audio_tokens")
+        if not isinstance(audio_tokens, Tensor):
+            raise ValueError("validation samples require audio_tokens")
+        decode = getattr(self.model, "decode_audio_tokens", None)
+        if not callable(decode):
+            raise RuntimeError("the generator cannot decode reference audio tokens")
+        ground_truth, ground_truth_lengths = decode(
+            audio_tokens,
+            batch.get("decoder_attention_mask"),
+        )
+
+        generation_batch = dict(batch)
+        generation_batch["generation_kwargs"] = dict(generation_kwargs or {})
+        device = audio_tokens.device
+        cuda_devices = []
+        if device.type == "cuda":
+            cuda_devices = [
+                device.index if device.index is not None else torch.cuda.current_device()
+            ]
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(int(generation_seed))
+            generated, prompts = self._generate_test_batch(generation_batch)
+        return {
+            "ground_truth": ground_truth,
+            "ground_truth_lengths": ground_truth_lengths,
+            "generated": generated,
+            "prompts": prompts,
+            "metadata": batch.get("metadata"),
+            "sample_rate": int(getattr(self.model, "audio_sample_rate", 32000)),
+        }
+
+    @torch.no_grad()
     def test_step(
         self,
         batch: Mapping[str, Any],
@@ -275,28 +360,12 @@ class BaseGenerationModel(pl.LightningModule):
         self._sync_logger = logger
 
     def on_train_start(self) -> None:
-        if self._sync_logger is not None:
-            return
-        if self.log_backend == "swanlab":
-            import swanlab
-
-            run = swanlab.run
-        elif self.log_backend == "wandb":
-            import wandb
-
-            run = wandb.run
-        else:
-            raise ValueError("log_backend must be 'swanlab' or 'wandb'")
-        trainer = getattr(self, "_trainer", None)
-        log_every = trainer.log_every_n_steps if trainer is not None else None
-        self._sync_logger = WanbSyncLogger(
-            run=run,
-            log_every_n_steps=log_every,
-            log_backend=self.log_backend,
-        )
+        # WandbLogger is owned by Trainer. The optional legacy sync logger is
+        # only used when a caller explicitly injects one (mainly old tests).
+        return
 
     def on_validation_epoch_end(self) -> None:
-        if self._sync_logger is None:
+        if self._sync_logger is None or getattr(self, "_trainer", None) is not None:
             return
         self._sync_logger.add_epoch()
         self._sync_logger.log({}, on_epoch=True)

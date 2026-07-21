@@ -18,12 +18,14 @@ The recommended dataset batch is a mapping with these fields:
     EnCodec codes, shape ``[batch, num_codebooks, audio_length]``.  Values are
     integer codebook ids.  ``decoder_input_ids`` may be used instead, with the
     same shape.  The wrapper flattens this to the Hugging Face convention of
-    ``[batch * num_codebooks, audio_length]``.
+    ``[batch * num_codebooks, audio_length]`` for explicit decoder inputs.
+    During training, the wrapper constructs the same right-shifted
+    teacher-forcing inputs as Transformers and computes padding-safe loss
+    outside the backbone.
 ``labels`` (optional)
     Target EnCodec codes in the same ``[batch, num_codebooks, audio_length]``
     layout.  If omitted by ``training_step``, ``audio_tokens`` are used as
-    labels and the original MusicGen cross-entropy is computed by the wrapped
-    model.
+    labels and padding-safe MusicGen cross-entropy is computed by this wrapper.
 ``decoder_attention_mask`` (optional)
     Audio-token mask, shape ``[batch, audio_length]``.
 
@@ -37,6 +39,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
+from pathlib import Path
 import re
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -45,9 +49,13 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from src.model.module.lora_adapter import (
+    NonlinearLoRA,
     freeze_module_except_adapters,
     inject_attention_adapters,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -104,6 +112,27 @@ class MusicGen(nn.Module):
         adapter_zero_init: Zero-initialise the adapter up projection.
     """
 
+    # Dataset/control metadata must remain available to the outer Lightning
+    # module but must not be forwarded as unexpected Hugging Face arguments.
+    NON_MODEL_BATCH_KEYS = {
+        "text",
+        "texts",
+        "prompt",
+        "prompts",
+        "description",
+        "descriptions",
+        "metadata",
+        "artist_label",
+        "genre_labels",
+        "concept_ids",
+        "concept_weights",
+        "concept_targets",
+        "control_direction",
+        "suppressed_artist_ids",
+        "generation_inputs",
+        "generation_kwargs",
+    }
+
     def __init__(
         self,
         backbone: nn.Module,
@@ -116,16 +145,26 @@ class MusicGen(nn.Module):
         adapter_activation: str = "gelu",
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
+        adapter_checkpoint: Optional[str | Path] = None,
+        adapter_checkpoint_strict: bool = True,
     ) -> None:
         super().__init__()
         if not isinstance(backbone, nn.Module):
             raise TypeError("backbone must be a torch.nn.Module")
 
         self.backbone = backbone
+        self._patch_legacy_decoder_start_token(backbone)
         self.processor = processor
         self.use_adapter = bool(use_adapter)
         self.adapter_module_names: list[str] = []
+        self.loaded_adapter_checkpoint: Optional[str] = None
         self._hidden_state_handles: List[Any] = []
+
+        if adapter_checkpoint is not None and not self.use_adapter:
+            raise ValueError(
+                "adapter_checkpoint requires use_adapter=True so matching adapter "
+                "modules exist before weights are loaded"
+            )
 
         if self.use_adapter:
             adapter_root = self._find_decoder_root(backbone)
@@ -141,6 +180,11 @@ class MusicGen(nn.Module):
                 raise RuntimeError(
                     "use_adapter=True but no decoder attention modules were found"
                 )
+            if adapter_checkpoint is not None:
+                self.load_adapter_checkpoint(
+                    adapter_checkpoint,
+                    strict=adapter_checkpoint_strict,
+                )
 
         if freeze_backbone is None:
             freeze_backbone = self.use_adapter
@@ -149,10 +193,40 @@ class MusicGen(nn.Module):
             freeze_module_except_adapters(self.backbone)
 
         self.num_codebooks = self._read_num_codebooks(backbone)
-        self.pad_token_id = self._read_config_value("pad_token_id")
+        self.pad_token_id = self._read_config_value(
+            "pad_token_id", config_path=("decoder",)
+        )
+        if self.pad_token_id is None:
+            self.pad_token_id = self._read_config_value("pad_token_id")
+        self.decoder_start_token_id = self._read_decoder_start_token_id()
         self.audio_sample_rate = self._read_config_value(
             "sampling_rate", config_path=("audio_encoder",)
         ) or 32000
+
+    @staticmethod
+    def _patch_legacy_decoder_start_token(backbone: nn.Module) -> None:
+        """Make pre-Transformers-5 MusicGen configs trainable with labels.
+
+        Older official checkpoints leave ``decoder_start_token_id`` unset but
+        use the shared BOS/PAD special token (2048). Transformers 5 requires
+        the start ID explicitly when it shifts labels for teacher forcing.
+        """
+
+        config = getattr(backbone, "config", None)
+        decoder_config = getattr(config, "decoder", None)
+        if decoder_config is None:
+            return
+        if getattr(decoder_config, "decoder_start_token_id", None) is not None:
+            return
+        start_token_id = getattr(decoder_config, "bos_token_id", None)
+        if start_token_id is None:
+            start_token_id = getattr(decoder_config, "pad_token_id", None)
+        if start_token_id is None:
+            raise ValueError(
+                "MusicGen decoder config needs decoder_start_token_id, "
+                "bos_token_id, or pad_token_id for teacher forcing"
+            )
+        decoder_config.decoder_start_token_id = int(start_token_id)
 
     @property
     def model(self) -> nn.Module:
@@ -174,6 +248,8 @@ class MusicGen(nn.Module):
         adapter_activation: str = "gelu",
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
+        adapter_checkpoint: Optional[str | Path] = None,
+        adapter_checkpoint_strict: bool = True,
         model_kwargs: Optional[Dict[str, Any]] = None,
         processor_kwargs: Optional[Dict[str, Any]] = None,
         device: Optional[torch.device | str] = None,
@@ -220,10 +296,101 @@ class MusicGen(nn.Module):
             adapter_activation=adapter_activation,
             adapter_dropout=adapter_dropout,
             adapter_zero_init=adapter_zero_init,
+            adapter_checkpoint=adapter_checkpoint,
+            adapter_checkpoint_strict=adapter_checkpoint_strict,
         )
         if device is not None:
             wrapped.to(device)
         return wrapped
+
+    def encode_text(
+        self,
+        input_ids: Tensor,
+        attention_mask: Optional[Tensor] = None,
+    ) -> Any:
+        """Run MusicGen's own text encoder for callers that cache text states.
+
+        The returned object is accepted directly as the composite model's
+        ``encoder_outputs`` and exposes ``last_hidden_state``.
+        """
+
+        encoder = getattr(self.backbone, "text_encoder", None)
+        if encoder is None:
+            get_encoder = getattr(self.backbone, "get_encoder", None)
+            encoder = get_encoder() if callable(get_encoder) else None
+        if not isinstance(encoder, nn.Module):
+            raise RuntimeError("the MusicGen backbone does not expose a text encoder")
+        kwargs: Dict[str, Any] = {"input_ids": input_ids}
+        if attention_mask is not None:
+            kwargs["attention_mask"] = attention_mask
+        try:
+            return encoder(**kwargs, return_dict=True)
+        except TypeError as error:
+            if "return_dict" not in str(error):
+                raise
+            return encoder(**kwargs)
+
+    @torch.no_grad()
+    def decode_audio_tokens(
+        self,
+        audio_tokens: Tensor,
+        attention_mask: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor]:
+        """Decode padded ``[B, Q, T]`` EnCodec IDs into reference audio.
+
+        Samples are decoded independently so padding ID 2048 is never passed
+        to EnCodec.  The returned audio is zero-padded to ``[B, C, S_max]``;
+        the second tensor stores each decoded sample length.
+        """
+
+        if audio_tokens.ndim != 3:
+            raise ValueError("audio_tokens must have shape [B, Q, T]")
+        audio_encoder = getattr(self.backbone, "audio_encoder", None)
+        if not isinstance(audio_encoder, nn.Module) or not hasattr(
+            audio_encoder, "decode"
+        ):
+            raise RuntimeError("the MusicGen backbone has no EnCodec decoder")
+        if attention_mask is not None and attention_mask.shape != (
+            audio_tokens.shape[0],
+            audio_tokens.shape[-1],
+        ):
+            raise ValueError("attention_mask must have shape [B, T]")
+
+        decoded_samples: list[Tensor] = []
+        lengths: list[int] = []
+        for sample_index in range(audio_tokens.shape[0]):
+            token_length = (
+                int(attention_mask[sample_index].sum().item())
+                if attention_mask is not None
+                else audio_tokens.shape[-1]
+            )
+            if token_length <= 0:
+                raise ValueError("every audio sample must contain at least one token")
+            codes = audio_tokens[
+                sample_index : sample_index + 1, :, :token_length
+            ].long()
+            decoded = audio_encoder.decode(
+                audio_codes=codes.unsqueeze(0),
+                audio_scales=[None],
+                return_dict=True,
+            )
+            audio_values = getattr(decoded, "audio_values", None)
+            if audio_values is None and isinstance(decoded, (tuple, list)):
+                audio_values = decoded[0]
+            if not isinstance(audio_values, Tensor) or audio_values.ndim != 3:
+                raise RuntimeError("EnCodec decode must return audio shaped [B, C, S]")
+            sample = audio_values[0]
+            decoded_samples.append(sample)
+            lengths.append(sample.shape[-1])
+
+        max_length = max(lengths)
+        channels = decoded_samples[0].shape[0]
+        padded = decoded_samples[0].new_zeros(
+            (len(decoded_samples), channels, max_length)
+        )
+        for index, sample in enumerate(decoded_samples):
+            padded[index, :, : sample.shape[-1]] = sample
+        return padded, torch.tensor(lengths, device=padded.device, dtype=torch.long)
 
     @staticmethod
     def _find_decoder_root(backbone: nn.Module) -> nn.Module:
@@ -258,6 +425,31 @@ class MusicGen(nn.Module):
         value = getattr(config, name, None) if config is not None else None
         return value if isinstance(value, int) else None
 
+    def _read_decoder_start_token_id(self) -> int:
+        """Resolve the special token used to start teacher forcing."""
+
+        for name in ("decoder_start_token_id", "bos_token_id", "pad_token_id"):
+            for path in (("decoder",), ()):
+                value = self._read_config_value(name, config_path=path)
+                if value is not None:
+                    return value
+        if self.pad_token_id is not None:
+            return self.pad_token_id
+        raise ValueError("MusicGen needs a decoder start/BOS/PAD token ID")
+
+    def _shift_audio_labels(self, labels: Tensor) -> Tensor:
+        """Create MusicGen teacher-forcing inputs without invoking HF loss."""
+
+        pad_token_id = self.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.decoder_start_token_id
+        shifted = labels.new_full(labels.shape, int(pad_token_id))
+        shifted[..., 0] = self.decoder_start_token_id
+        if labels.shape[-1] > 1:
+            shifted[..., 1:] = labels[..., :-1]
+        shifted.masked_fill_(shifted.eq(-100), int(pad_token_id))
+        return shifted
+
     @property
     def trainable_parameters(self):
         """Iterator over parameters visible to an outer optimizer."""
@@ -266,6 +458,142 @@ class MusicGen(nn.Module):
 
     def trainable_parameter_count(self) -> int:
         return sum(parameter.numel() for parameter in self.trainable_parameters)
+
+    def _named_adapter_parameters(self) -> Dict[str, nn.Parameter]:
+        """Return only parameters owned by injected nonlinear LoRA modules."""
+
+        prefixes = tuple(
+            f"{name}."
+            for name, module in self.named_modules()
+            if name and isinstance(module, NonlinearLoRA)
+        )
+        return {
+            name: parameter
+            for name, parameter in self.named_parameters()
+            if prefixes and name.startswith(prefixes)
+        }
+
+    def adapter_state_dict(self) -> Dict[str, Tensor]:
+        """Return a compact CPU copy containing only adapter parameters."""
+
+        parameters = self._named_adapter_parameters()
+        if not parameters:
+            raise RuntimeError("this MusicGen wrapper has no injected adapters")
+        return {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in parameters.items()
+        }
+
+    @staticmethod
+    def _checkpoint_tensor_mapping(checkpoint_path: Path) -> Mapping[str, Tensor]:
+        """Read a raw, compact, or Lightning checkpoint without executing code."""
+
+        payload = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
+        )
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                f"adapter checkpoint must contain a mapping, got "
+                f"{type(payload).__name__}"
+            )
+        for container_name in ("adapter_state_dict", "state_dict"):
+            nested = payload.get(container_name)
+            if isinstance(nested, Mapping):
+                payload = nested
+                break
+        tensors = {
+            str(name): value
+            for name, value in payload.items()
+            if isinstance(value, Tensor)
+        }
+        if not tensors:
+            raise ValueError(
+                f"adapter checkpoint contains no tensor state: {checkpoint_path}"
+            )
+        return tensors
+
+    def load_adapter_checkpoint(
+        self,
+        checkpoint: str | Path,
+        *,
+        strict: bool = True,
+    ) -> Dict[str, Any]:
+        """Load adapter parameters from an adapter-only or Lightning checkpoint.
+
+        Stage-one Lightning checkpoints prefix generator keys with ``model.``.
+        This loader matches each adapter parameter by its complete MusicGen key
+        or by a unique suffix, so the same file can initialize a stage-two
+        :class:`UnlearnableGenerationModel` without restoring trainer state,
+        optimizer state, global step, or unrelated frozen MusicGen tensors.
+        """
+
+        if not self.use_adapter:
+            raise RuntimeError("load_adapter_checkpoint requires use_adapter=True")
+        path = Path(checkpoint).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"adapter checkpoint not found: {path}")
+
+        expected = self._named_adapter_parameters()
+        if not expected:
+            raise RuntimeError("no adapter parameters are available to load")
+        source = self._checkpoint_tensor_mapping(path)
+        matched_source_keys: set[str] = set()
+        missing: list[str] = []
+        loaded: list[str] = []
+
+        with torch.no_grad():
+            for expected_name, parameter in expected.items():
+                candidates = [
+                    source_name
+                    for source_name in source
+                    if source_name == expected_name
+                    or source_name.endswith(f".{expected_name}")
+                ]
+                if not candidates:
+                    missing.append(expected_name)
+                    continue
+                if len(candidates) > 1:
+                    raise RuntimeError(
+                        f"adapter parameter {expected_name!r} has ambiguous "
+                        f"checkpoint matches: {candidates}"
+                    )
+                source_name = candidates[0]
+                value = source[source_name]
+                if tuple(value.shape) != tuple(parameter.shape):
+                    raise ValueError(
+                        f"adapter shape mismatch for {expected_name}: model expects "
+                        f"{tuple(parameter.shape)}, checkpoint has {tuple(value.shape)}. "
+                        "Use the same adapter_rank as stage one."
+                    )
+                parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
+                matched_source_keys.add(source_name)
+                loaded.append(expected_name)
+
+        unexpected = sorted(
+            name
+            for name in source
+            if ".adapter." in name and name not in matched_source_keys
+        )
+        if strict and (missing or unexpected):
+            raise RuntimeError(
+                "adapter checkpoint did not exactly match the initialized adapters; "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        if not loaded:
+            raise RuntimeError(
+                f"no adapter parameters from {path} matched this MusicGen model"
+            )
+        self.loaded_adapter_checkpoint = str(path)
+        log.info("Loaded %d adapter tensors from %s", len(loaded), path)
+        return {
+            "path": str(path),
+            "loaded": loaded,
+            "missing": missing,
+            "unexpected": unexpected,
+        }
 
     @staticmethod
     def _is_hidden_state_block(module: nn.Module) -> bool:
@@ -503,6 +831,11 @@ class MusicGen(nn.Module):
         *,
         condition_kwargs: Optional[Dict[str, Any]] = None,
         intervention_scale: float | Tensor = 1.0,
+        batch_repeat_interleave: Optional[int] = None,
+        cfg_conditional_only: bool = False,
+        details_callback: Optional[
+            Callable[[Tensor, Mapping[str, Tensor], HiddenStateHookContext], None]
+        ] = None,
         prepend: bool = False,
     ) -> List[Any]:
         """Connect ``src.model.module.ConceptLearner`` to decoder layers.
@@ -526,13 +859,31 @@ class MusicGen(nn.Module):
                 )
             condition = prepare_condition(**condition_kwargs)
 
+        if batch_repeat_interleave is None:
+            batch_repeat_interleave = int(self.num_codebooks or 1)
+
         def _apply(hidden_state: Tensor, context: HiddenStateHookContext) -> Tensor:
-            return concept_learner(
+            result = concept_learner(
                 hidden_state,
                 block_index=context.block_index,
                 condition=condition,
                 intervention_scale=intervention_scale,
+                batch_repeat_interleave=batch_repeat_interleave,
+                cfg_conditional_only=cfg_conditional_only,
+                return_details=details_callback is not None,
             )
+            if details_callback is None:
+                return result
+            if not isinstance(result, Mapping):
+                raise TypeError(
+                    "concept learner must return a details mapping when "
+                    "details_callback is supplied"
+                )
+            details_callback(hidden_state, result, context)
+            changed = result.get("hidden_state")
+            if not isinstance(changed, Tensor):
+                raise TypeError("concept learner details must contain hidden_state")
+            return changed
 
         return self.register_hidden_state_hook(
             _apply,
@@ -558,10 +909,17 @@ class MusicGen(nn.Module):
         values = dict(batch)
         input_ids = self._first(values, "input_ids", "text_input_ids")
         attention_mask = self._first(values, "attention_mask", "text_attention_mask")
+        explicit_decoder_input_ids = values.get("decoder_input_ids")
         decoder_input_ids = self._first(values, "decoder_input_ids", "audio_tokens")
         labels = self._first(values, "labels", "audio_labels", "target_audio_tokens")
         if labels is None and use_audio_as_labels:
             labels = decoder_input_ids
+            # Hugging Face MusicGen applies its codebook delay/teacher-forcing
+            # shift only when decoder_input_ids are omitted. ``audio_tokens``
+            # is the project's target shortcut; an explicitly supplied
+            # decoder_input_ids tensor remains caller-controlled.
+            if explicit_decoder_input_ids is None:
+                decoder_input_ids = None
 
         standard_labels: Optional[Tensor] = None
         shape_info: Optional[Tuple[int, int, int]] = None
@@ -574,6 +932,17 @@ class MusicGen(nn.Module):
             standard_labels, shape_info = self._standardize_audio_layout(
                 labels_tensor, name="labels"
             )
+
+        # Transformers computes its own loss whenever ``labels`` are passed.
+        # On Windows ROCm, the first right-padded batch can hang in the
+        # internal cross-entropy ignore-index kernel. Reproduce HF's
+        # shift_tokens_right here and let this wrapper compute loss only over
+        # valid targets instead.
+        labels_only_teacher_forcing = (
+            standard_labels is not None and decoder_input_ids is None
+        )
+        if labels_only_teacher_forcing:
+            decoder_input_ids = self._shift_audio_labels(standard_labels)
 
         if decoder_input_ids is not None:
             decoder_input_ids = torch.as_tensor(decoder_input_ids)
@@ -601,6 +970,8 @@ class MusicGen(nn.Module):
             key: value
             for key, value in values.items()
             if key
+            not in self.NON_MODEL_BATCH_KEYS
+            and key
             not in {
                 "audio_tokens",
                 "audio_labels",
@@ -620,8 +991,12 @@ class MusicGen(nn.Module):
             payload["attention_mask"] = attention_mask
         if decoder_input_ids is not None:
             payload["decoder_input_ids"] = decoder_input_ids
-        if standard_labels is not None:
-            payload["labels"] = standard_labels.transpose(1, 2).contiguous()
+
+        # Cached targets are right-padded. Valid causal positions cannot see
+        # that future padding, and padded targets are excluded by the wrapper
+        # loss. Explicit decoder prompts still retain their caller mask.
+        if labels_only_teacher_forcing:
+            payload.pop("decoder_attention_mask", None)
 
         # A decoder-only MusicgenForCausalLM uses input_ids rather than the
         # composite model's decoder_input_ids.  This is useful when training

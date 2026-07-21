@@ -1,6 +1,3 @@
-# import wandb
-import swanlab
-import wandb
 from pytorch_lightning.utilities import rank_zero_only
 
 
@@ -12,8 +9,12 @@ class WanbSyncLogger:
         self.log_every_n_steps = log_every_n_steps
 
         if log_backend == 'wandb':
+            import wandb
+
             self.log_backend = wandb
         elif log_backend == 'swanlab':
+            import swanlab
+
             self.log_backend = swanlab
         else:
             raise ValueError(f'Invalid log backend specified: {log_backend}')

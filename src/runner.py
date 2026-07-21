@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from queue import Empty, Queue
+from threading import Thread
 from typing import Any
 
 import pytorch_lightning as pl
 from hydra.utils import instantiate
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig, ListConfig, open_dict
 from torch import nn
 
 
@@ -38,7 +40,7 @@ def _instantiate_metrics(metric_config: Any):
 def setup_model(config: DictConfig) -> pl.LightningModule:
     """Build the configured Lightning model from the composed root config.
 
-    Nested generator and ConceptLearner configs are deliberately passed to the
+    Nested generator and explicit ConceptLearner configs are passed to the
     LightningModule without recursive instantiation; each LightningModule owns
     construction of its PyTorch components as required by the project design.
     """
@@ -71,4 +73,73 @@ def setup_model(config: DictConfig) -> pl.LightningModule:
     return model
 
 
-__all__ = ["setup_model"]
+def setup_dataset(config: DictConfig) -> pl.LightningDataModule:
+    """Instantiate/setup the DataModule and resolve explicit concept metadata."""
+
+    if config is None or "runner" not in config:
+        raise ValueError("setup_dataset expects the composed config with runner section")
+    dataset_cfg = config.runner.get("dataset")
+    if dataset_cfg is None:
+        raise ValueError("config.runner.dataset is required")
+    datamodule = instantiate(dataset_cfg)
+    if not isinstance(datamodule, pl.LightningDataModule):
+        raise TypeError(
+            "config.runner.dataset must instantiate a LightningDataModule, "
+            f"got {type(datamodule).__name__}"
+        )
+    datamodule.setup("fit")
+
+    model_cfg = config.runner.get("model")
+    learner_cfg = None
+    if model_cfg is not None:
+        nested_model_cfg = model_cfg.get("model_cfg")
+        if nested_model_cfg is not None:
+            learner_cfg = nested_model_cfg.get("concept_learner")
+    if learner_cfg is not None and hasattr(datamodule, "num_concepts"):
+        expected = int(datamodule.num_concepts)
+        configured = learner_cfg.get("num_concepts")
+        with open_dict(learner_cfg):
+            if configured in (None, "auto"):
+                learner_cfg["num_concepts"] = expected
+            elif int(configured) != expected:
+                raise ValueError(
+                    f"ConceptLearner num_concepts={configured} but the DataModule "
+                    f"built {expected}; set num_concepts: auto"
+                )
+            granularity = str(getattr(datamodule, "concept_granularity", "artist"))
+            if learner_cfg.get("concept_name") in (None, "auto"):
+                learner_cfg["concept_name"] = granularity
+            if granularity != "artist":
+                raise ValueError(
+                    "explicit copyright control currently requires "
+                    "concept_granularity=artist"
+                )
+            group_matrix = getattr(datamodule, "artist_genre_matrix", None)
+            if group_matrix is not None and learner_cfg.get("group_matrix") in (
+                None,
+                "auto",
+            ):
+                learner_cfg["group_matrix"] = group_matrix.tolist()
+    return datamodule
+
+
+def timeout_input(timeout: float = 10.0) -> int | None:
+    """Read one console line without blocking checkpoint resume forever."""
+
+    queue: Queue[str] = Queue(maxsize=1)
+
+    def _read() -> None:
+        try:
+            queue.put(input())
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    Thread(target=_read, daemon=True).start()
+    try:
+        value = queue.get(timeout=timeout).strip()
+        return int(value) if value else None
+    except (Empty, ValueError):
+        return None
+
+
+__all__ = ["setup_dataset", "setup_model", "timeout_input"]
