@@ -7,15 +7,15 @@ exp:
   uuid: ${now:%m%d_%H%M%S}@${exp.cmt}
   cmt: null_comment
   save_dir: ${hydra:runtime.cwd}/logs/${exp.uuid}
-  seed: 2026
+  seed: 0
+  resume_from: ${oc.env:RESUME_FROM,null}
+
+wandb:
+  entity: ${oc.env:WANDB_ENTITY,null}
+  mode: ${oc.env:WANDB_MODE,online}
+  run_id: ${oc.env:WANDB_RUN_ID,null}
+  log_model: false
 
 hydra:
   run:
     dir: ${exp.save_dir}/hydra_output
-
-checkpoint:
-  _target_: src.callback.checkpoint.Checkpoint
-  output_path: ${exp.save_dir}/checkpoints
-  exp_id: ${exp.uuid}
-  monitor: mIoU
-  topk_models: 1

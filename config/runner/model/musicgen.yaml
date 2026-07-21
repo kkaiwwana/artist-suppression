@@ -11,6 +11,9 @@ model_cfg:
     adapter_activation: gelu
     adapter_dropout: 0.0
     adapter_zero_init: true
+    # Optional weight initialization only; this is not a Lightning resume.
+    adapter_checkpoint: null
+    adapter_checkpoint_strict: true
     model_kwargs:
       local_files_only: true
     processor_kwargs:
@@ -21,4 +24,4 @@ model_cfg:
     guidance_scale: 3.0
     max_new_tokens: 512
 
-log_backend: swanlab
+log_backend: wandb

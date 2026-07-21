@@ -1,56 +1,97 @@
 _target_: src.model.unlearnable_gen.UnlearnableGenerationModel
 
 model_cfg:
+  # Keep ordinary inference identical to the pretrained MusicGen model.
+  # Artist controls are the only trainable component in the default setup.
+  train_generator: false
+
   generator:
     _target_: src.model.gen.musicgen.MusicGen.from_pretrained
     model_name_or_path: ${oc.env:MUSICGEN_MODEL,checkpoints/musicgen-small}
-    use_adapter: true
+    use_adapter: false
     freeze_backbone: true
     adapter_rank: 8
     adapter_alpha: 8
     adapter_activation: gelu
     adapter_dropout: 0.0
     adapter_zero_init: true
+    # Stage two may point this at a stage-one BaseGenerationModel .ckpt. Only
+    # adapter tensors are loaded; Lightning optimizer/step state is ignored.
+    adapter_checkpoint: ${oc.env:ADAPTER_CHECKPOINT,null}
+    adapter_checkpoint_strict: true
     model_kwargs:
       local_files_only: true
     processor_kwargs:
       local_files_only: true
 
-  # Override these dimensions if a MusicGen scale other than "small" is used.
   concept_learner:
     _target_: src.model.module.concept_learner.ConceptLearner
-    num_concepts: 10
+    num_concepts: auto
     hidden_dim: 1024
     style_dim: 256
     num_blocks: 24
-    text_feature_dim: 768
-    concept_name: artist
-    routing_mode: categorical
-    representation: fixed
-    intervention: additive
+    concept_name: auto
     controller_dim: 512
     depth_dim: 32
-    temperature: 1.0
-    initial_block_scale: 0.1
+    initial_block_scale: 0.0
+    # The learned raw parameter is mapped through tanh before injection. This
+    # is a hard safety bound, not merely a regularizer.
+    max_block_scale: 0.01
+    # Clip a token's direction only when its RMS exceeds the incoming hidden
+    # RMS. Small/immature residuals are never amplified. Together with the
+    # bounded scale this guarantees RMS(delta_h) / RMS(h) <= abs(scale).
+    cap_intervention_rms: true
+    intervention_norm_epsilon: 1.0e-12
+    # setup_dataset fills this with the track-balanced artist/coarse-genre map.
+    group_matrix: auto
 
-  hook_blocks: null
+  # Default to the upper half of the decoder. CLI overrides can still select a
+  # different subset, but unlisted blocks receive exactly zero intervention.
+  hook_blocks: [18, 21, 23]
   intervention_scale: 1.0
-  suppression:
-    enabled: true
-    probability: 0.25
-    weight: 0.1
-    # Each suppressed sample is pushed above mean retain CE by this margin.
-    margin: 0.5
-    ensure_mixed_batch: true
+  validation_full_precision: true
+
+  control_training:
+    # Only one controlled branch keeps an autograd graph on each optimizer
+    # step. This preserves roughly one-forward activation memory while cycling
+    # through the complete objective.
+    branch_cycle: [positive, positive, symmetry, positive, preservation]
+    # The frozen default branch is a reference/monitor. Set this above zero
+    # only when train_generator=true and deliberate base adaptation is desired.
+    default_weight: 0.0
+    # Do not minimize positive CE forever: once the finite margins below are
+    # satisfied, this path stops asking for a stronger controller.
+    positive_weight: 0.0
+    # Require +artist to improve artist-A likelihood by a finite margin.
+    positive_margin: 0.01
+    positive_margin_weight: 1.0
+    # The correct artist must outperform a deterministic wrong-artist control.
+    # The wrong branch is detached, so this cannot learn by damaging it.
+    artist_contrastive:
+      enabled: true
+      weight: 1.0
+      margin: 0.005
+    # Make -artist mirror the finite +artist improvement instead of maximizing
+    # MusicGen CE without a bound.
+    suppression_symmetry_weight: 0.5
+    preservation:
+      enabled: true
+      weight: 1.0
+      margin: 0.05
+
+  losses:
+    style_bank_l2_weight: 0.0001
+    concept_center_weight: 0.01
+    # Per-branch energy is the SUM of squared relative RMS over all hooked
+    # blocks. Penalize only the excess above one network-wide RMS budget, so
+    # adding more hook blocks can no longer hide intervention through a mean.
+    intervention_energy_weight: 100.0
+    intervention_global_rms_budget: 0.005
+    intervention_energy_epsilon: 1.0e-6
+
   test_generation:
     do_sample: true
-    guidance_scale: 3.0
+    guidance_scale: 1.0
     max_new_tokens: 512
-  losses:
-    generator_loss_weight: 1.0
-    router_weight: 1.0
-    style_bank_l2_weight: 0.0001
-    style_bank_kl_weight: 0.0
-    routing_loss_type: auto
 
-log_backend: swanlab
+log_backend: wandb

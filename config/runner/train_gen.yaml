@@ -1,10 +1,43 @@
 defaults:
-  - model: musicgen
+  - model: unlearnable_musicgen
   - _self_
 
-# Dataset integration is intentionally left external at this stage.  The
-# Lightning model consumes the batch contract documented by MusciGen.
-dataset: null
+dataset:
+  _target_: src.data.dataset.JamendoMaxCapsDataModule
+  subset_dir: ${oc.env:JAMENDO_SUBSET_DIR,datasets/jamendo_max_caps/subsets/signature_artists0256_songs064_seed0042}
+  token_dir: null
+  processor_name_or_path: ${oc.env:MUSICGEN_MODEL,checkpoints/musicgen-small}
+  local_files_only: true
+  concept_granularity: ${oc.env:CONCEPT_GRANULARITY,artist}
+  genre_field: coarse_genres
+  # Optional build-time sub-subset controls; the external subset is untouched.
+  artist_keys: null
+  genres: null
+  max_artists: null
+  max_songs_per_artist: null
+  max_clips_per_song: null
+  max_samples: null
+  val_fraction: 0.05
+  test_fraction: 0.05
+  seed: ${exp.seed}
+  train_batch_size: ${runner.loader.train_loader_params.batch_size}
+  eval_batch_size: ${runner.loader.val_loader_params.batch_size}
+  num_workers: ${runner.loader.train_loader_params.num_workers}
+  persistent_workers: ${runner.loader.train_loader_params.persistent_workers}
+  eval_num_workers: ${runner.loader.val_loader_params.num_workers}
+  eval_persistent_workers: ${runner.loader.val_loader_params.persistent_workers}
+  pin_memory: true
+  prefetch_factor: 2
+  drop_last_train: true
+  max_text_length: 128
+  max_audio_token_length: null
+  audio_pad_token_id: 2048
+  max_cached_shards: 2
+  validate_tokens: true
+  # Equalize artist exposure at the clip level. The external subset has the
+  # same song count per artist but very different clips per song.
+  balance_artists: true
+
 metrics: []
 
 loader:
@@ -15,39 +48,54 @@ loader:
     
   val_loader_params:
     batch_size: 2
-    num_workers: 4
-    persistent_workers: True
+    # Validation is short relative to training. Reading in the main process
+    # avoids long-run Windows worker/IPC stalls at epoch boundaries.
+    num_workers: 0
+    persistent_workers: False
 
 
 optimizer:
   name: AdamW
   optimizer_params:
+    # Only the randomly initialized explicit controller trains by default.
     lr: 0.0001
     weight_decay: 0
 
 
-scheduler:
-  name: OneCycleLR
-  interval: step
-  frequency: 1
-  scheduler_params:
-    max_lr: ${runner.optimizer.optimizer_params.lr}
-    epochs: ${runner.trainer.max_epochs}
-    # scripts/run.py may replace this after the datamodule is constructed.
-    steps_per_epoch: 1
-    div_factor: 10
-    pct_start: 0.1
-    final_div_factor: 10
-    cycle_momentum: False
+# A fixed learning rate avoids gate-opening transients and AMP scheduler-step
+# mismatches when a scaled optimizer step is skipped.
+scheduler: null
+
+checkpoint:
+  monitor: val/loss_total
+  mode: min
+  save_top_k: 3
+  save_last: true
+
+validation_audio:
+  every_n_epochs: 1
+  num_samples: 2
+  generation_seed: ${exp.seed}
+  max_audio_seconds: 10.0
+  # Samples are captured once from the train loader and reused every epoch.
+  log_key: training/audio_comparisons
+  fail_on_error: false
+  generation_kwargs:
+    do_sample: true
+    guidance_scale: 3.0
+    max_new_tokens: 250
 
 
 trainer:
   max_epochs: 20
   log_every_n_steps: 10
 
+  accelerator: auto
   num_nodes: 1
   devices: -1
   precision: 16-mixed
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
 
   limit_train_batches: 1.0
   limit_val_batches: 1.0
