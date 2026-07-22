@@ -49,9 +49,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from src.model.module.lora_adapter import (
-    NonlinearLoRA,
-    freeze_module_except_adapters,
-    inject_attention_adapters,
+    LoRALinear,
+    freeze_module_except_lora,
+    inject_attention_lora,
 )
 
 
@@ -93,23 +93,23 @@ class MusicGen(nn.Module):
     """Pure PyTorch wrapper around Transformers MusicGen.
 
     Construct the wrapper around an already-created model with ``backbone`` or
-    use :meth:`from_pretrained` for the normal text-to-music workflow.  When
-    ``use_adapter=True``, every attention module in the decoder is wrapped by a
-    zero-initialised non-linear LoRA branch.  Unless explicitly overridden,
-    this also freezes the original model parameters.
+    use :meth:`from_pretrained` for the normal text-to-music workflow. When
+    ``use_adapter=True``, standard linear LoRA branches are inserted into the
+    selected projections of every decoder attention module. Unless explicitly
+    overridden, this also freezes the original model parameters.
 
     Args:
         backbone: A ``MusicgenForConditionalGeneration`` instance.  Passing a
             model object keeps the class usable with locally constructed tiny
             configs in tests and notebooks.
         processor: An ``AutoProcessor`` instance used by ``generate``.
-        use_adapter: Insert a non-linear LoRA after every decoder attention.
+        use_adapter: Insert standard LoRA into decoder attention projections.
         freeze_backbone: Freeze the base model.  Defaults to ``use_adapter``.
         adapter_rank: Bottleneck rank for each adapter.
         adapter_alpha: LoRA alpha.  Defaults to the rank.
-        adapter_activation: Activation in the adapter bottleneck.
+        adapter_targets: Attention projections to adapt. Defaults to Q and V.
         adapter_dropout: Dropout before the adapter down projection.
-        adapter_zero_init: Zero-initialise the adapter up projection.
+        adapter_zero_init: Zero-initialise LoRA B for an identity start.
     """
 
     # Dataset/control metadata must remain available to the outer Lightning
@@ -142,7 +142,7 @@ class MusicGen(nn.Module):
         freeze_backbone: Optional[bool] = None,
         adapter_rank: int = 8,
         adapter_alpha: Optional[float] = None,
-        adapter_activation: str = "gelu",
+        adapter_targets: Sequence[str] = ("q_proj", "v_proj"),
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
@@ -168,11 +168,11 @@ class MusicGen(nn.Module):
 
         if self.use_adapter:
             adapter_root = self._find_decoder_root(backbone)
-            self.adapter_module_names = inject_attention_adapters(
+            self.adapter_module_names = inject_attention_lora(
                 adapter_root,
                 rank=adapter_rank,
                 alpha=adapter_alpha,
-                activation=adapter_activation,
+                targets=adapter_targets,
                 dropout=adapter_dropout,
                 zero_init=adapter_zero_init,
             )
@@ -190,7 +190,7 @@ class MusicGen(nn.Module):
             freeze_backbone = self.use_adapter
         self.freeze_backbone = bool(freeze_backbone)
         if self.freeze_backbone:
-            freeze_module_except_adapters(self.backbone)
+            freeze_module_except_lora(self.backbone)
 
         self.num_codebooks = self._read_num_codebooks(backbone)
         self.pad_token_id = self._read_config_value(
@@ -245,7 +245,7 @@ class MusicGen(nn.Module):
         freeze_backbone: Optional[bool] = None,
         adapter_rank: int = 8,
         adapter_alpha: Optional[float] = None,
-        adapter_activation: str = "gelu",
+        adapter_targets: Sequence[str] = ("q_proj", "v_proj"),
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
@@ -293,7 +293,7 @@ class MusicGen(nn.Module):
             freeze_backbone=freeze_backbone,
             adapter_rank=adapter_rank,
             adapter_alpha=adapter_alpha,
-            adapter_activation=adapter_activation,
+            adapter_targets=adapter_targets,
             adapter_dropout=adapter_dropout,
             adapter_zero_init=adapter_zero_init,
             adapter_checkpoint=adapter_checkpoint,
@@ -460,18 +460,15 @@ class MusicGen(nn.Module):
         return sum(parameter.numel() for parameter in self.trainable_parameters)
 
     def _named_adapter_parameters(self) -> Dict[str, nn.Parameter]:
-        """Return only parameters owned by injected nonlinear LoRA modules."""
+        """Return only trainable LoRA A/B parameters, never base weights."""
 
-        prefixes = tuple(
-            f"{name}."
-            for name, module in self.named_modules()
-            if name and isinstance(module, NonlinearLoRA)
-        )
-        return {
-            name: parameter
-            for name, parameter in self.named_parameters()
-            if prefixes and name.startswith(prefixes)
-        }
+        parameters: Dict[str, nn.Parameter] = {}
+        for module_name, module in self.named_modules():
+            if not module_name or not isinstance(module, LoRALinear):
+                continue
+            parameters[f"{module_name}.lora_A.weight"] = module.lora_A.weight
+            parameters[f"{module_name}.lora_B.weight"] = module.lora_B.weight
+        return parameters
 
     def adapter_state_dict(self) -> Dict[str, Tensor]:
         """Return a compact CPU copy containing only adapter parameters."""
@@ -572,10 +569,21 @@ class MusicGen(nn.Module):
                 matched_source_keys.add(source_name)
                 loaded.append(expected_name)
 
+        legacy_nonlinear = sorted(
+            name
+            for name in source
+            if ".adapter.down." in name or ".adapter.up." in name
+        )
+        if legacy_nonlinear:
+            raise RuntimeError(
+                "checkpoint contains the retired nonlinear output adapter and "
+                "cannot initialize standard projection LoRA; retrain stage one"
+            )
         unexpected = sorted(
             name
             for name in source
-            if ".adapter." in name and name not in matched_source_keys
+            if (".lora_A." in name or ".lora_B." in name)
+            and name not in matched_source_keys
         )
         if strict and (missing or unexpected):
             raise RuntimeError(

@@ -1,17 +1,17 @@
 """Compatibility namespace for model modules."""
 
 from .lora_adapter import (
-    AttentionOutputAdapter,
-    NonlinearLoRA,
-    NonlinearLoRAAdapter,
     freeze_module_except_adapters,
+    freeze_module_except_lora,
     inject_attention_adapters,
+    inject_attention_lora,
+    LoRALinear,
 )
 
 __all__ = [
-    "AttentionOutputAdapter",
-    "NonlinearLoRA",
-    "NonlinearLoRAAdapter",
     "freeze_module_except_adapters",
+    "freeze_module_except_lora",
     "inject_attention_adapters",
+    "inject_attention_lora",
+    "LoRALinear",
 ]

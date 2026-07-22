@@ -8,7 +8,9 @@ model_cfg:
     freeze_backbone: true
     adapter_rank: 8
     adapter_alpha: 8
-    adapter_activation: gelu
+    # Authentic linear LoRA on both decoder self- and cross-attention.
+    # Q/V is the standard default; K and output projections remain frozen.
+    adapter_targets: [q_proj, v_proj]
     adapter_dropout: 0.0
     adapter_zero_init: true
     # Optional weight initialization only; this is not a Lightning resume.

@@ -1,108 +1,97 @@
-"""Non-linear LoRA adapters for attention outputs.
+"""Standard linear LoRA adapters for MusicGen attention projections.
 
-The adapter in this file is deliberately independent of Transformers and
-PyTorch Lightning.  It is a residual bottleneck branch::
+The adapter follows the original LoRA parameterisation for a frozen linear
+projection ``W``::
 
-    x -> dropout -> down -> activation -> up -> scaling
+    y = W x + (alpha / rank) * B(A(dropout(x)))
 
-The ``up`` projection is zero-initialised by default.  Consequently an
-adapter-enabled model is functionally identical to the base model at
-initialisation, while the adapter parameters remain trainable.
+``A`` is Kaiming-initialised and ``B`` is zero-initialised by default, so
+injecting LoRA is an exact identity transformation at initialisation.  There
+is deliberately no activation between ``A`` and ``B``.
+
+MusicGen defaults to adapting the query and value projections in every
+decoder self-attention and cross-attention module.  Query/value is the common
+LoRA choice: query updates change which context is selected, while value
+updates change the content written back to the residual stream.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Tuple
+import math
+from typing import Iterable, List, Optional, Sequence
 
-import torch
 from torch import Tensor, nn
 
 
-def _activation(name: str) -> nn.Module:
-    """Build a small activation module from a user-facing name."""
-
-    normalized = name.lower().replace("-", "_")
-    if normalized == "gelu":
-        return nn.GELU()
-    if normalized == "silu":
-        return nn.SiLU()
-    if normalized == "relu":
-        return nn.ReLU()
-    if normalized == "tanh":
-        return nn.Tanh()
-    if normalized in {"identity", "linear", "none"}:
-        return nn.Identity()
-    raise ValueError(
-        "activation must be one of gelu, silu, relu, tanh, identity; "
-        f"got {name!r}"
-    )
-
-
-class NonlinearLoRA(nn.Module):
-    """A zero-initialised non-linear low-rank residual adapter.
+class LoRALinear(nn.Module):
+    """Wrap a frozen :class:`~torch.nn.Linear` with a trainable LoRA branch.
 
     Args:
-        in_features: Last-dimension size of the attention output.
-        out_features: Last-dimension size of the residual.  MusicGen
-            attention adapters normally use the same value as ``in_features``.
-        rank: Bottleneck rank.
-        alpha: LoRA scaling numerator.  The effective scale is ``alpha/rank``.
-        activation: Non-linearity between the down and up projections.
-        dropout: Dropout applied before the down projection.
-        zero_init: Zero-initialise the up projection when true.
-
-    The module accepts tensors of shape ``[..., in_features]`` and returns a
-    tensor of shape ``[..., out_features]``.  It returns the residual branch,
-    not ``x + residual``; :class:`AttentionOutputAdapter` performs the
-    residual addition around an existing attention module.
+        base_layer: Pretrained projection retained as the frozen base path.
+        rank: Low-rank dimension.
+        alpha: Scaling numerator. The effective multiplier is ``alpha/rank``.
+        dropout: Dropout applied only to the LoRA branch input.
+        zero_init: Zero-initialise ``B`` so the initial forward is identical
+            to the base layer. This should normally remain true.
     """
 
     def __init__(
         self,
-        in_features: int,
-        out_features: Optional[int] = None,
+        base_layer: nn.Linear,
+        *,
         rank: int = 8,
         alpha: Optional[float] = None,
-        activation: str = "gelu",
         dropout: float = 0.0,
         zero_init: bool = True,
     ) -> None:
         super().__init__()
-        if in_features <= 0:
-            raise ValueError("in_features must be positive")
-        if out_features is None:
-            out_features = in_features
-        if out_features <= 0:
-            raise ValueError("out_features must be positive")
+        if not isinstance(base_layer, nn.Linear):
+            raise TypeError("base_layer must be torch.nn.Linear")
         if rank <= 0:
             raise ValueError("rank must be positive")
         if not 0.0 <= dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
 
-        self.in_features = int(in_features)
-        self.out_features = int(out_features)
+        self.base_layer = base_layer
+        self.in_features = int(base_layer.in_features)
+        self.out_features = int(base_layer.out_features)
         self.rank = int(rank)
         self.alpha = float(rank if alpha is None else alpha)
         self.scaling = self.alpha / self.rank
         self.zero_init = bool(zero_init)
 
         self.dropout = nn.Dropout(dropout)
-        self.down = nn.Linear(self.in_features, self.rank, bias=False)
-        self.activation = _activation(activation)
-        self.up = nn.Linear(self.rank, self.out_features, bias=False)
+        self.lora_A = nn.Linear(self.in_features, self.rank, bias=False)
+        self.lora_B = nn.Linear(self.rank, self.out_features, bias=False)
+        self.reset_lora_parameters()
 
-        nn.init.kaiming_uniform_(self.down.weight, a=5**0.5)
+        reference = base_layer.weight
+        self.lora_A.to(device=reference.device, dtype=reference.dtype)
+        self.lora_B.to(device=reference.device, dtype=reference.dtype)
+
+        for parameter in self.base_layer.parameters():
+            parameter.requires_grad = False
+
+    def reset_lora_parameters(self) -> None:
+        """Initialise ``A`` and ``B`` using the standard LoRA scheme."""
+
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         if self.zero_init:
-            nn.init.zeros_(self.up.weight)
+            nn.init.zeros_(self.lora_B.weight)
         else:
-            nn.init.kaiming_uniform_(self.up.weight, a=5**0.5)
+            nn.init.kaiming_uniform_(self.lora_B.weight, a=math.sqrt(5))
 
-    def forward(self, x: Tensor) -> Tensor:
+    def lora_residual(self, x: Tensor) -> Tensor:
+        """Return only the scaled low-rank update for diagnostics/tests."""
+
         if x.shape[-1] != self.in_features:
             raise ValueError(
                 f"expected last dimension {self.in_features}, got {x.shape[-1]}"
             )
-        return self.up(self.activation(self.down(self.dropout(x)))) * self.scaling
+        return self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.base_layer(x) + self.lora_residual(x)
 
     def extra_repr(self) -> str:
         return (
@@ -112,156 +101,96 @@ class NonlinearLoRA(nn.Module):
         )
 
 
-# The longer name is useful in configuration files and keeps compatibility
-# with callers that prefer to call this an adapter rather than LoRA.
-NonlinearLoRAAdapter = NonlinearLoRA
-
-
-class AttentionOutputAdapter(nn.Module):
-    """Wrap an attention module and add a trainable residual after it.
-
-    Transformers attention modules generally return ``(hidden_states, ...)``
-    when attention weights or cache values are involved.  This wrapper updates
-    only the first element and preserves the remaining return values.
-    """
-
-    def __init__(self, attention: nn.Module, adapter: NonlinearLoRA) -> None:
-        super().__init__()
-        self.attention = attention
-        self.adapter = adapter
-
-    @staticmethod
-    def _replace_first(output: object, residual_fn) -> object:
-        if isinstance(output, Tensor):
-            return output + residual_fn(output)
-        if isinstance(output, tuple):
-            if not output or not isinstance(output[0], Tensor):
-                return output
-            return (output[0] + residual_fn(output[0]),) + output[1:]
-        if isinstance(output, list):
-            if not output or not isinstance(output[0], Tensor):
-                return output
-            return [output[0] + residual_fn(output[0]), *output[1:]]
-        # This is uncommon for attention modules, but gives a useful error
-        # instead of silently disabling the adapter for a custom module.
-        raise TypeError(
-            "attention output must be a Tensor, tuple, or list whose first "
-            f"item is a Tensor; got {type(output).__name__}"
-        )
-
-    def forward(self, *args, **kwargs):
-        output = self.attention(*args, **kwargs)
-        return self._replace_first(output, self.adapter)
-
-
 def _is_attention_module(module: nn.Module) -> bool:
-    if isinstance(module, nn.MultiheadAttention):
-        return True
     class_name = module.__class__.__name__.lower()
-    return "attention" in class_name and not isinstance(module, AttentionOutputAdapter)
+    return "attention" in class_name
 
 
-def _attention_dim(module: nn.Module) -> int:
-    for attribute in ("embed_dim", "hidden_size", "d_model"):
-        value = getattr(module, attribute, None)
-        if isinstance(value, int) and value > 0:
-            return value
-    for attribute in ("q_proj", "out_proj", "q_proj"):
-        projection = getattr(module, attribute, None)
-        value = getattr(projection, "in_features", None)
-        if isinstance(value, int) and value > 0:
-            return value
-    raise ValueError(
-        f"cannot infer hidden size for attention module {module.__class__.__name__}"
-    )
-
-
-def _get_parent(root: nn.Module, qualified_name: str) -> Tuple[nn.Module, str]:
-    parts = qualified_name.split(".")
-    parent = root
-    for part in parts[:-1]:
-        parent = getattr(parent, part)
-    return parent, parts[-1]
-
-
-def inject_attention_adapters(
+def inject_attention_lora(
     root: nn.Module,
     *,
     rank: int = 8,
     alpha: Optional[float] = None,
-    activation: str = "gelu",
     dropout: float = 0.0,
     zero_init: bool = True,
+    targets: Sequence[str] = ("q_proj", "v_proj"),
     include: Optional[Iterable[str]] = None,
 ) -> List[str]:
-    """Insert adapters after every matching attention module in ``root``.
+    """Inject LoRA into selected projections of decoder attention modules.
 
-    ``include`` optionally contains qualified module names.  When omitted, all
-    attention modules under ``root`` are wrapped.  The MusicGen wrapper passes
-    the decoder as ``root`` so the frozen T5 text encoder is not modified.
+    ``targets`` contains attention child names such as ``q_proj``, ``k_proj``,
+    ``v_proj`` or ``out_proj``. ``include`` optionally restricts attention
+    modules by their qualified names under ``root``. Calling this function
+    twice is idempotent.
 
-    Returns the qualified names of the wrapped attention modules.  Calling the
-    function twice on the same root is safe and does not double-wrap modules.
+    Returns:
+        Qualified projection names that are backed by :class:`LoRALinear`.
     """
 
+    target_names = tuple(str(name).strip() for name in targets)
+    if not target_names or any(not name for name in target_names):
+        raise ValueError("targets must contain at least one non-empty name")
+    if len(set(target_names)) != len(target_names):
+        raise ValueError("targets must not contain duplicates")
+
     allowed = set(include) if include is not None else None
-    names = [
-        name
+    attention_modules = [
+        (name, module)
         for name, module in root.named_modules()
         if name
         and (allowed is None or name in allowed)
         and _is_attention_module(module)
     ]
 
-    for name in names:
-        parent, child_name = _get_parent(root, name)
-        attention = getattr(parent, child_name)
-        if isinstance(attention, AttentionOutputAdapter):
-            continue
-        dim = _attention_dim(attention)
-        adapter = NonlinearLoRA(
-            in_features=dim,
-            out_features=dim,
-            rank=rank,
-            alpha=alpha,
-            activation=activation,
-            dropout=dropout,
-            zero_init=zero_init,
-        )
-        reference_parameter = next(attention.parameters(), None)
-        if reference_parameter is not None:
-            # Adapters are created after a pretrained model may already have
-            # been loaded in fp16/bf16 or placed on an accelerator.  Match the
-            # wrapped attention immediately so its first forward cannot mix
-            # devices or floating-point dtypes.
-            adapter = adapter.to(
-                device=reference_parameter.device,
-                dtype=reference_parameter.dtype,
+    for _, attention in attention_modules:
+        for target_name in target_names:
+            projection = getattr(attention, target_name, None)
+            if isinstance(projection, LoRALinear):
+                continue
+            if not isinstance(projection, nn.Linear):
+                continue
+            setattr(
+                attention,
+                target_name,
+                LoRALinear(
+                    projection,
+                    rank=rank,
+                    alpha=alpha,
+                    dropout=dropout,
+                    zero_init=zero_init,
+                ),
             )
-        setattr(parent, child_name, AttentionOutputAdapter(attention, adapter))
 
     return [
         name
         for name, module in root.named_modules()
-        if isinstance(module, AttentionOutputAdapter)
+        if name and isinstance(module, LoRALinear)
     ]
 
 
-def freeze_module_except_adapters(module: nn.Module) -> None:
-    """Freeze ``module`` while keeping all :class:`NonlinearLoRA` trainable."""
+def freeze_module_except_lora(module: nn.Module) -> None:
+    """Freeze ``module`` and leave only LoRA ``A``/``B`` trainable."""
 
     for parameter in module.parameters():
         parameter.requires_grad = False
     for submodule in module.modules():
-        if isinstance(submodule, NonlinearLoRA):
-            for parameter in submodule.parameters():
+        if isinstance(submodule, LoRALinear):
+            for parameter in submodule.lora_A.parameters():
+                parameter.requires_grad = True
+            for parameter in submodule.lora_B.parameters():
                 parameter.requires_grad = True
 
 
+# Keep the historical helper names as API aliases while changing their
+# semantics to authentic linear LoRA. New code should use the explicit names.
+inject_attention_adapters = inject_attention_lora
+freeze_module_except_adapters = freeze_module_except_lora
+
+
 __all__ = [
-    "AttentionOutputAdapter",
-    "NonlinearLoRA",
-    "NonlinearLoRAAdapter",
+    "LoRALinear",
     "freeze_module_except_adapters",
+    "freeze_module_except_lora",
     "inject_attention_adapters",
+    "inject_attention_lora",
 ]
