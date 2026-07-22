@@ -108,6 +108,7 @@ class MusicGen(nn.Module):
         adapter_rank: Bottleneck rank for each adapter.
         adapter_alpha: LoRA alpha.  Defaults to the rank.
         adapter_targets: Attention projections to adapt. Defaults to Q and V.
+        adapter_layers: Optional decoder layer indices. Defaults to every layer.
         adapter_dropout: Dropout before the adapter down projection.
         adapter_zero_init: Zero-initialise LoRA B for an identity start.
     """
@@ -143,6 +144,7 @@ class MusicGen(nn.Module):
         adapter_rank: int = 8,
         adapter_alpha: Optional[float] = None,
         adapter_targets: Sequence[str] = ("q_proj", "v_proj"),
+        adapter_layers: Optional[Sequence[int]] = None,
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
@@ -156,6 +158,9 @@ class MusicGen(nn.Module):
         self._patch_legacy_decoder_start_token(backbone)
         self.processor = processor
         self.use_adapter = bool(use_adapter)
+        self.adapter_layers = (
+            None if adapter_layers is None else tuple(int(index) for index in adapter_layers)
+        )
         self.adapter_module_names: list[str] = []
         self.loaded_adapter_checkpoint: Optional[str] = None
         self._hidden_state_handles: List[Any] = []
@@ -173,6 +178,7 @@ class MusicGen(nn.Module):
                 rank=adapter_rank,
                 alpha=adapter_alpha,
                 targets=adapter_targets,
+                layers=adapter_layers,
                 dropout=adapter_dropout,
                 zero_init=adapter_zero_init,
             )
@@ -246,6 +252,7 @@ class MusicGen(nn.Module):
         adapter_rank: int = 8,
         adapter_alpha: Optional[float] = None,
         adapter_targets: Sequence[str] = ("q_proj", "v_proj"),
+        adapter_layers: Optional[Sequence[int]] = None,
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
@@ -294,6 +301,7 @@ class MusicGen(nn.Module):
             adapter_rank=adapter_rank,
             adapter_alpha=adapter_alpha,
             adapter_targets=adapter_targets,
+            adapter_layers=adapter_layers,
             adapter_dropout=adapter_dropout,
             adapter_zero_init=adapter_zero_init,
             adapter_checkpoint=adapter_checkpoint,

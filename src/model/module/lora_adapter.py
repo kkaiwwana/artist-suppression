@@ -18,6 +18,7 @@ updates change the content written back to the residual stream.
 from __future__ import annotations
 
 import math
+import re
 from typing import Iterable, List, Optional, Sequence
 
 from torch import Tensor, nn
@@ -106,6 +107,16 @@ def _is_attention_module(module: nn.Module) -> bool:
     return "attention" in class_name
 
 
+def _layer_index(qualified_name: str) -> Optional[int]:
+    """Extract a transformer layer index from a qualified module name."""
+
+    match = re.search(
+        r"(?:^|\.)(?:layers|blocks|decoder_layers)\.(\d+)(?:\.|$)",
+        qualified_name,
+    )
+    return int(match.group(1)) if match else None
+
+
 def inject_attention_lora(
     root: nn.Module,
     *,
@@ -114,14 +125,15 @@ def inject_attention_lora(
     dropout: float = 0.0,
     zero_init: bool = True,
     targets: Sequence[str] = ("q_proj", "v_proj"),
+    layers: Optional[Sequence[int]] = None,
     include: Optional[Iterable[str]] = None,
 ) -> List[str]:
     """Inject LoRA into selected projections of decoder attention modules.
 
     ``targets`` contains attention child names such as ``q_proj``, ``k_proj``,
-    ``v_proj`` or ``out_proj``. ``include`` optionally restricts attention
-    modules by their qualified names under ``root``. Calling this function
-    twice is idempotent.
+    ``v_proj`` or ``out_proj``. ``layers`` optionally selects decoder layer
+    indices. ``include`` optionally restricts attention modules by their
+    qualified names under ``root``. Calling this function twice is idempotent.
 
     Returns:
         Qualified projection names that are backed by :class:`LoRALinear`.
@@ -133,6 +145,18 @@ def inject_attention_lora(
     if len(set(target_names)) != len(target_names):
         raise ValueError("targets must not contain duplicates")
 
+    selected_layers: Optional[tuple[int, ...]] = None
+    if layers is not None:
+        if not layers:
+            raise ValueError("layers must be null or contain at least one index")
+        if any(isinstance(index, bool) or not isinstance(index, int) for index in layers):
+            raise TypeError("layers must contain Python integers")
+        selected_layers = tuple(int(index) for index in layers)
+        if any(index < 0 for index in selected_layers):
+            raise ValueError("layers must contain non-negative indices")
+        if len(set(selected_layers)) != len(selected_layers):
+            raise ValueError("layers must not contain duplicates")
+
     allowed = set(include) if include is not None else None
     attention_modules = [
         (name, module)
@@ -141,6 +165,24 @@ def inject_attention_lora(
         and (allowed is None or name in allowed)
         and _is_attention_module(module)
     ]
+    if selected_layers is not None:
+        available_layers = {
+            index
+            for name, _ in attention_modules
+            if (index := _layer_index(name)) is not None
+        }
+        missing_layers = sorted(set(selected_layers) - available_layers)
+        if missing_layers:
+            raise ValueError(
+                f"requested LoRA decoder layers do not exist: {missing_layers}; "
+                f"available={sorted(available_layers)}"
+            )
+        selected = set(selected_layers)
+        attention_modules = [
+            (name, module)
+            for name, module in attention_modules
+            if _layer_index(name) in selected
+        ]
 
     for _, attention in attention_modules:
         for target_name in target_names:
