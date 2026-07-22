@@ -19,9 +19,9 @@ The recommended dataset batch is a mapping with these fields:
     integer codebook ids.  ``decoder_input_ids`` may be used instead, with the
     same shape.  The wrapper flattens this to the Hugging Face convention of
     ``[batch * num_codebooks, audio_length]`` for explicit decoder inputs.
-    During training, the wrapper constructs the same right-shifted
-    teacher-forcing inputs as Transformers and computes padding-safe loss
-    outside the backbone.
+    During label-only training, the wrapper constructs MusicGen's original
+    delayed multi-codebook teacher-forcing pattern and computes padding-safe
+    loss outside the backbone.
 ``labels`` (optional)
     Target EnCodec codes in the same ``[batch, num_codebooks, audio_length]``
     layout.  If omitted by ``training_step``, ``audio_tokens`` are used as
@@ -111,6 +111,10 @@ class MusicGen(nn.Module):
         adapter_layers: Optional decoder layer indices. Defaults to every layer.
         adapter_dropout: Dropout before the adapter down projection.
         adapter_zero_init: Zero-initialise LoRA B for an identity start.
+        use_delay_pattern_teacher_forcing: Reproduce MusicGen's original
+            delayed codebook pattern for label-only training. Disable only to
+            load the project's historical synchronous-teacher-forcing
+            behaviour for comparison.
     """
 
     # Dataset/control metadata must remain available to the outer Lightning
@@ -149,6 +153,7 @@ class MusicGen(nn.Module):
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
         adapter_checkpoint_strict: bool = True,
+        use_delay_pattern_teacher_forcing: bool = True,
     ) -> None:
         super().__init__()
         if not isinstance(backbone, nn.Module):
@@ -164,6 +169,9 @@ class MusicGen(nn.Module):
         self.adapter_module_names: list[str] = []
         self.loaded_adapter_checkpoint: Optional[str] = None
         self._hidden_state_handles: List[Any] = []
+        self.use_delay_pattern_teacher_forcing = bool(
+            use_delay_pattern_teacher_forcing
+        )
 
         if adapter_checkpoint is not None and not self.use_adapter:
             raise ValueError(
@@ -257,6 +265,7 @@ class MusicGen(nn.Module):
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
         adapter_checkpoint_strict: bool = True,
+        use_delay_pattern_teacher_forcing: bool = True,
         model_kwargs: Optional[Dict[str, Any]] = None,
         processor_kwargs: Optional[Dict[str, Any]] = None,
         device: Optional[torch.device | str] = None,
@@ -306,6 +315,7 @@ class MusicGen(nn.Module):
             adapter_zero_init=adapter_zero_init,
             adapter_checkpoint=adapter_checkpoint,
             adapter_checkpoint_strict=adapter_checkpoint_strict,
+            use_delay_pattern_teacher_forcing=use_delay_pattern_teacher_forcing,
         )
         if device is not None:
             wrapped.to(device)
@@ -446,7 +456,14 @@ class MusicGen(nn.Module):
         raise ValueError("MusicGen needs a decoder start/BOS/PAD token ID")
 
     def _shift_audio_labels(self, labels: Tensor) -> Tensor:
-        """Create MusicGen teacher-forcing inputs without invoking HF loss."""
+        """Create the historical synchronous teacher-forcing inputs.
+
+        MusicGen was pretrained with a delayed multi-codebook pattern, so new
+        training uses :meth:`_build_delay_pattern_teacher_forcing_inputs`.
+        This helper remains available behind
+        ``use_delay_pattern_teacher_forcing=False`` for old experiment
+        reproduction and for callers with a single codebook.
+        """
 
         pad_token_id = self.pad_token_id
         if pad_token_id is None:
@@ -457,6 +474,96 @@ class MusicGen(nn.Module):
             shifted[..., 1:] = labels[..., :-1]
         shifted.masked_fill_(shifted.eq(-100), int(pad_token_id))
         return shifted
+
+    def _build_delay_pattern_teacher_forcing_inputs(
+        self,
+        labels: Tensor,
+    ) -> Tensor:
+        """Build MusicGen's original delayed-codebook teacher-forcing input.
+
+        Raw cached targets keep the stable ``[B, Q, T]`` project layout.  For
+        codebook ``q``, target token ``labels[:, q, t]`` is predicted by the
+        logits at pattern position ``q + t``.  The corresponding ground-truth
+        token is therefore written into decoder input position ``q + t + 1``.
+
+        With four codebooks, one pattern column looks like::
+
+            [q0(s), q1(s-1), q2(s-2), q3(s-3)]
+
+        Empty positions contain MusicGen's shared BOS/PAD special token.  The
+        returned sequence has length ``T + Q - 1``: it includes every context
+        position needed to predict all ``Q * T`` raw targets, but does not feed
+        the final target token back into the model.
+        """
+
+        if labels.ndim != 3:
+            raise ValueError(
+                "delay-pattern labels must have shape [B, Q, T], got "
+                f"{tuple(labels.shape)}"
+            )
+        _, num_codebooks, sequence_length = labels.shape
+        if num_codebooks <= 0 or sequence_length <= 0:
+            raise ValueError("delay-pattern labels require positive Q and T")
+        if self.num_codebooks is not None and num_codebooks != self.num_codebooks:
+            raise ValueError(
+                f"expected {self.num_codebooks} codebooks, got {num_codebooks}"
+            )
+
+        pad_token_id = self.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.decoder_start_token_id
+        pad_token_id = int(pad_token_id)
+
+        # Keep one extra column while placing raw targets, then remove the last
+        # column to obtain the causal decoder inputs.  This mirrors generation:
+        # column zero is the all-special start pattern and each codebook is
+        # delayed by one additional column.
+        delayed = labels.new_full(
+            (labels.shape[0], num_codebooks, sequence_length + num_codebooks),
+            pad_token_id,
+        )
+        safe_labels = labels.masked_fill(labels.eq(-100), pad_token_id)
+        for codebook in range(num_codebooks):
+            start = codebook + 1
+            delayed[:, codebook, start : start + sequence_length] = safe_labels[
+                :, codebook
+            ]
+        return delayed[..., :-1]
+
+    @staticmethod
+    def _align_delay_pattern_logits(logits: Tensor, labels: Tensor) -> Tensor:
+        """Map delayed pattern logits back to raw ``[B, Q, T, V]`` order."""
+
+        if logits.ndim != 4 or labels.ndim != 3:
+            raise ValueError(
+                "delay-pattern alignment expects logits [B,Q,S,V] and "
+                f"labels [B,Q,T], got {tuple(logits.shape)} and {tuple(labels.shape)}"
+            )
+        batch_size, num_codebooks, pattern_length, _ = logits.shape
+        if labels.shape[:2] != (batch_size, num_codebooks):
+            raise ValueError(
+                "delay-pattern logits/labels batch or codebook dimensions differ: "
+                f"{tuple(logits.shape)} vs {tuple(labels.shape)}"
+            )
+        target_length = labels.shape[-1]
+        expected_pattern_length = target_length + num_codebooks - 1
+        if pattern_length == target_length:
+            # Explicit caller-controlled decoder inputs use the legacy raw
+            # layout and do not need delayed alignment.
+            return logits
+        if pattern_length != expected_pattern_length:
+            raise ValueError(
+                "delayed logits have an unexpected sequence length: expected "
+                f"{expected_pattern_length} for labels {tuple(labels.shape)}, "
+                f"got {pattern_length}"
+            )
+        return torch.stack(
+            [
+                logits[:, codebook, codebook : codebook + target_length]
+                for codebook in range(num_codebooks)
+            ],
+            dim=1,
+        )
 
     @property
     def trainable_parameters(self):
@@ -949,16 +1056,23 @@ class MusicGen(nn.Module):
                 labels_tensor, name="labels"
             )
 
-        # Transformers computes its own loss whenever ``labels`` are passed.
-        # On Windows ROCm, the first right-padded batch can hang in the
-        # internal cross-entropy ignore-index kernel. Reproduce HF's
-        # shift_tokens_right here and let this wrapper compute loss only over
-        # valid targets instead.
+        # Keep labels out of Transformers' built-in loss so the wrapper can
+        # reproduce the original AudioCraft delay pattern and compute CE only
+        # over valid raw targets.  Hugging Face's labels-only path shifts every
+        # codebook synchronously, while MusicGen generation and pretraining use
+        # one additional pattern-step delay for each residual codebook.
         labels_only_teacher_forcing = (
             standard_labels is not None and decoder_input_ids is None
         )
         if labels_only_teacher_forcing:
-            decoder_input_ids = self._shift_audio_labels(standard_labels)
+            if self.use_delay_pattern_teacher_forcing:
+                decoder_input_ids = (
+                    self._build_delay_pattern_teacher_forcing_inputs(
+                        standard_labels
+                    )
+                )
+            else:
+                decoder_input_ids = self._shift_audio_labels(standard_labels)
 
         if decoder_input_ids is not None:
             decoder_input_ids = torch.as_tensor(decoder_input_ids)
@@ -1191,6 +1305,14 @@ class MusicGen(nn.Module):
         if raw_logits is None:
             raise RuntimeError("the MusicGen backbone did not return logits")
         logits = self._reshape_logits(raw_logits, shape_info)
+        if (
+            standard_labels is not None
+            and self.use_delay_pattern_teacher_forcing
+        ):
+            logits = self._align_delay_pattern_logits(
+                logits,
+                standard_labels.to(logits.device),
+            )
         loss = raw_loss
         if loss is None and standard_labels is not None:
             loss = self._compute_loss(logits, standard_labels.to(logits.device))
