@@ -7,7 +7,7 @@ model_cfg:
 
   generator:
     _target_: src.model.gen.musicgen.MusicGen.from_pretrained
-    model_name_or_path: ${oc.env:MUSICGEN_MODEL,checkpoints/musicgen-small}
+    model_name_or_path: ${oc.env:MUSICGEN_MODEL,models/musicgen-small}
     use_adapter: false
     freeze_backbone: true
     adapter_rank: 8
