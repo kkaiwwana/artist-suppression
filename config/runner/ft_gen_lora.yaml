@@ -7,12 +7,12 @@ metrics: []
 
 loader:
   train_loader_params:
-    batch_size: 16
+    batch_size: 4
     num_workers: 8
     persistent_workers: True
     
   val_loader_params:
-    batch_size: 16
+    batch_size: 4
     # Validation is short relative to training. Reading in the main process
     # avoids long-run Windows worker/IPC stalls at epoch boundaries.
     num_workers: 0
@@ -23,7 +23,7 @@ optimizer:
   name: AdamW
   optimizer_params:
     # Only the randomly initialized explicit controller trains by default.
-    lr: 0.0001
+    lr: 1e-5
     weight_decay: 0
 
 
@@ -58,7 +58,7 @@ trainer:
   accelerator: auto
   num_nodes: 1
   devices: -1
-  precision: 16-mixed
+  precision: 32
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
 
