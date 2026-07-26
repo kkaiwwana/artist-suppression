@@ -1435,8 +1435,8 @@ class MusicGen(nn.Module):
         The returned tensor has the Transformers MusicGen shape
         ``[batch, channels, samples]``.  ``inputs`` can be supplied when the
         caller already ran the processor.  All additional keyword arguments,
-        such as ``do_sample``, ``guidance_scale`` and ``max_new_tokens``, are
-        forwarded to ``backbone.generate``.
+        such as ``do_sample``, ``guidance_scale``, ``top_k``, ``temperature``
+        and ``max_new_tokens``, are forwarded to ``backbone.generate``.
         """
 
         if inputs is None:
