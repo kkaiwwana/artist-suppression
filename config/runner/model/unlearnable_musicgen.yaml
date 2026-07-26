@@ -96,7 +96,7 @@ model_cfg:
 
   test_generation:
     do_sample: true
-    guidance_scale: 1.0
+    guidance_scale: 3.0
     max_new_tokens: 512
 
 log_backend: wandb

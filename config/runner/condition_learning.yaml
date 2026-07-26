@@ -1,18 +1,19 @@
 defaults:
-  - model: musicgen
+  - model: unlearnable_musicgen
   - dataset: jmd_max_caps
   - _self_
+
 
 metrics: []
 
 loader:
   train_loader_params:
-    batch_size: 4
+    batch_size: 16
     num_workers: 8
     persistent_workers: True
     
   val_loader_params:
-    batch_size: 4
+    batch_size: 16
     # Validation is short relative to training. Reading in the main process
     # avoids long-run Windows worker/IPC stalls at epoch boundaries.
     num_workers: 0
@@ -23,7 +24,7 @@ optimizer:
   name: AdamW
   optimizer_params:
     # Only the randomly initialized explicit controller trains by default.
-    lr: 1e-5
+    lr: 0.00001
     weight_decay: 0
 
 
@@ -47,18 +48,18 @@ validation_audio:
   fail_on_error: false
   generation_kwargs:
     do_sample: true
-    guidance_scale: 1.0
+    guidance_scale: 3.0
     max_new_tokens: 250
 
 
 trainer:
-  max_epochs: 10
-  log_every_n_steps: 30
+  max_epochs: 20
+  log_every_n_steps: 10
 
   accelerator: auto
   num_nodes: 1
   devices: -1
-  precision: 32
+  precision: 16-mixed
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
 

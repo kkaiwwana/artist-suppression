@@ -1,9 +1,7 @@
 defaults:
-  - model: unlearnable_musicgen
+  - model: musicgen
   - dataset: jmd_max_caps
   - _self_
-
-
 
 metrics: []
 
@@ -25,7 +23,7 @@ optimizer:
   name: AdamW
   optimizer_params:
     # Only the randomly initialized explicit controller trains by default.
-    lr: 0.00003
+    lr: 1e-4
     weight_decay: 0
 
 
@@ -36,7 +34,7 @@ scheduler: null
 checkpoint:
   monitor: val/loss_total
   mode: min
-  save_top_k: 3
+  save_top_k: 2
   save_last: true
 
 validation_audio:
@@ -49,13 +47,13 @@ validation_audio:
   fail_on_error: false
   generation_kwargs:
     do_sample: true
-    guidance_scale: 1.0
+    guidance_scale: 3.0
     max_new_tokens: 250
 
 
 trainer:
-  max_epochs: 20
-  log_every_n_steps: 10
+  max_epochs: 10
+  log_every_n_steps: 30
 
   accelerator: auto
   num_nodes: 1
