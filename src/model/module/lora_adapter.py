@@ -126,14 +126,18 @@ def inject_attention_lora(
     zero_init: bool = True,
     targets: Sequence[str] = ("q_proj", "v_proj"),
     layers: Optional[Sequence[int]] = None,
+    attention_types: Optional[Sequence[str]] = None,
     include: Optional[Iterable[str]] = None,
 ) -> List[str]:
     """Inject LoRA into selected projections of decoder attention modules.
 
     ``targets`` contains attention child names such as ``q_proj``, ``k_proj``,
     ``v_proj`` or ``out_proj``. ``layers`` optionally selects decoder layer
-    indices. ``include`` optionally restricts attention modules by their
-    qualified names under ``root``. Calling this function twice is idempotent.
+    indices. ``attention_types`` optionally selects attention modules by the
+    final component of their qualified name, for example ``self_attn`` or
+    ``encoder_attn``. ``include`` optionally restricts attention modules by
+    their full qualified names under ``root``. Calling this function twice is
+    idempotent.
 
     Returns:
         Qualified projection names that are backed by :class:`LoRALinear`.
@@ -157,6 +161,20 @@ def inject_attention_lora(
         if len(set(selected_layers)) != len(selected_layers):
             raise ValueError("layers must not contain duplicates")
 
+    selected_attention_types: Optional[tuple[str, ...]] = None
+    if attention_types is not None:
+        selected_attention_types = tuple(
+            str(attention_type).strip() for attention_type in attention_types
+        )
+        if not selected_attention_types or any(
+            not attention_type for attention_type in selected_attention_types
+        ):
+            raise ValueError(
+                "attention_types must be null or contain at least one non-empty name"
+            )
+        if len(set(selected_attention_types)) != len(selected_attention_types):
+            raise ValueError("attention_types must not contain duplicates")
+
     allowed = set(include) if include is not None else None
     attention_modules = [
         (name, module)
@@ -165,6 +183,25 @@ def inject_attention_lora(
         and (allowed is None or name in allowed)
         and _is_attention_module(module)
     ]
+    if selected_attention_types is not None:
+        available_attention_types = {
+            name.rsplit(".", 1)[-1] for name, _ in attention_modules
+        }
+        missing_attention_types = sorted(
+            set(selected_attention_types) - available_attention_types
+        )
+        if missing_attention_types:
+            raise ValueError(
+                "requested attention types do not exist: "
+                f"{missing_attention_types}; "
+                f"available={sorted(available_attention_types)}"
+            )
+        selected = set(selected_attention_types)
+        attention_modules = [
+            (name, module)
+            for name, module in attention_modules
+            if name.rsplit(".", 1)[-1] in selected
+        ]
     if selected_layers is not None:
         available_layers = {
             index

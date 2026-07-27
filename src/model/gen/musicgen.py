@@ -109,6 +109,8 @@ class MusicGen(nn.Module):
         adapter_alpha: LoRA alpha.  Defaults to the rank.
         adapter_targets: Attention projections to adapt. Defaults to Q and V.
         adapter_layers: Optional decoder layer indices. Defaults to every layer.
+        adapter_attention_types: Optional attention module names such as
+            ``encoder_attn`` or ``self_attn``. Defaults to both types.
         adapter_dropout: Dropout before the adapter down projection.
         adapter_zero_init: Zero-initialise LoRA B for an identity start.
         use_delay_pattern_teacher_forcing: Reproduce MusicGen's original
@@ -149,6 +151,7 @@ class MusicGen(nn.Module):
         adapter_alpha: Optional[float] = None,
         adapter_targets: Sequence[str] = ("q_proj", "v_proj"),
         adapter_layers: Optional[Sequence[int]] = None,
+        adapter_attention_types: Optional[Sequence[str]] = None,
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
@@ -187,6 +190,7 @@ class MusicGen(nn.Module):
                 alpha=adapter_alpha,
                 targets=adapter_targets,
                 layers=adapter_layers,
+                attention_types=adapter_attention_types,
                 dropout=adapter_dropout,
                 zero_init=adapter_zero_init,
             )
@@ -261,6 +265,7 @@ class MusicGen(nn.Module):
         adapter_alpha: Optional[float] = None,
         adapter_targets: Sequence[str] = ("q_proj", "v_proj"),
         adapter_layers: Optional[Sequence[int]] = None,
+        adapter_attention_types: Optional[Sequence[str]] = None,
         adapter_dropout: float = 0.0,
         adapter_zero_init: bool = True,
         adapter_checkpoint: Optional[str | Path] = None,
@@ -311,6 +316,7 @@ class MusicGen(nn.Module):
             adapter_alpha=adapter_alpha,
             adapter_targets=adapter_targets,
             adapter_layers=adapter_layers,
+            adapter_attention_types=adapter_attention_types,
             adapter_dropout=adapter_dropout,
             adapter_zero_init=adapter_zero_init,
             adapter_checkpoint=adapter_checkpoint,

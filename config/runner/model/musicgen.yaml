@@ -8,9 +8,10 @@ model_cfg:
     freeze_backbone: true
     adapter_rank: 32
     adapter_alpha: 32
-    # Authentic linear LoRA on both decoder self- and cross-attention.
-    # Q/V is the standard default; K and output projections remain frozen.
-    adapter_targets: [q_proj, v_proj]
+    # Keep the autoregressive self-attention path frozen. Cross-attention K/V
+    # depends on static text features and is the safer dataset-adaptation path.
+    adapter_targets: [k_proj, v_proj]
+    adapter_attention_types: [encoder_attn]
     # null adapts all 24 decoder layers. Override with e.g. [18,19,20,21,22,23].
     adapter_layers: [18, 19, 20, 21, 22, 23]
     adapter_dropout: 0.0
