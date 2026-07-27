@@ -47,8 +47,18 @@ model_cfg:
     # bounded scale this guarantees RMS(delta_h) / RMS(h) <= abs(scale).
     cap_intervention_rms: true
     intervention_norm_epsilon: 1.0e-12
-    # setup_dataset fills this with the track-balanced artist/coarse-genre map.
-    group_matrix: auto
+    # Build an adaptive local reference from decoded artist residuals rather
+    # than relying on noisy coarse-genre tags. Similarities are detached and
+    # maintained by EMA so conditions cannot game their own neighbour set.
+    peer_mode: similarity
+    peer_top_k: 8
+    peer_temperature: 0.2
+    peer_similarity_momentum: 0.95
+    # Uniform leave-one-out centering during the first updates lets artist
+    # residuals acquire signal before their cosine neighbourhood is trusted.
+    peer_warmup_steps: 100
+    # Keep similarity estimation aligned with the layers that are hooked.
+    intervention_blocks: ${..hook_blocks}
 
   # Default to the upper half of the decoder. CLI overrides can still select a
   # different subset, but unlisted blocks receive exactly zero intervention.
@@ -79,6 +89,9 @@ model_cfg:
     # Make -artist mirror the finite +artist improvement instead of maximizing
     # MusicGen CE without a bound.
     suppression_symmetry_weight: 0.5
+    # Clamp the target degradation even if +artist happens to produce a large
+    # likelihood gain. A non-positive gain maps to zero in the implementation.
+    suppression_symmetry_max_gain: 0.05
     preservation:
       enabled: true
       weight: 1.0

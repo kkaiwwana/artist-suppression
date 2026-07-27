@@ -114,12 +114,14 @@ def setup_dataset(config: DictConfig) -> pl.LightningDataModule:
                     "explicit copyright control currently requires "
                     "concept_granularity=artist"
                 )
-            group_matrix = getattr(datamodule, "artist_genre_matrix", None)
-            if group_matrix is not None and learner_cfg.get("group_matrix") in (
-                None,
-                "auto",
-            ):
-                learner_cfg["group_matrix"] = group_matrix.tolist()
+            # Genre metadata is only injected for an explicit legacy ablation.
+            # Similarity-centred control derives peers from decoded residuals.
+            if str(learner_cfg.get("peer_mode", "similarity")) == "genre":
+                group_matrix = getattr(datamodule, "artist_genre_matrix", None)
+                if group_matrix is not None and learner_cfg.get(
+                    "group_matrix"
+                ) in (None, "auto"):
+                    learner_cfg["group_matrix"] = group_matrix.tolist()
     return datamodule
 
 

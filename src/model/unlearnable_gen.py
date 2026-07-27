@@ -73,6 +73,19 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             self.model.eval()
         return self
 
+    def on_train_batch_start(self, batch: Any, batch_idx: int) -> None:
+        """Update artist-neighbour similarities once before each train step."""
+
+        del batch, batch_idx
+        if self.concept_learner.peer_mode == "similarity":
+            self.concept_learner.refresh_peer_similarity()
+
+    def on_validation_epoch_start(self) -> None:
+        """Make validation use residual similarities from the latest weights."""
+
+        if self.concept_learner.peer_mode == "similarity":
+            self.concept_learner.refresh_peer_similarity()
+
     def _validate_objective_config(self) -> None:
         values = {
             "default_weight": _cfg_get(self.objective_cfg, "default_weight", 0.0),
@@ -82,6 +95,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             ),
             "suppression_symmetry_weight": _cfg_get(
                 self.objective_cfg, "suppression_symmetry_weight", 1.0
+            ),
+            "suppression_symmetry_max_gain": _cfg_get(
+                self.objective_cfg,
+                "suppression_symmetry_max_gain",
+                None,
             ),
         }
         preservation = _cfg_get(self.objective_cfg, "preservation", {})
@@ -94,6 +112,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             self.loss_cfg, "intervention_energy_weight", 0.0
         )
         for name, value in values.items():
+            if value is None:
+                continue
             if float(value) < 0:
                 raise ValueError(f"control_training.{name} must be non-negative")
         for name, value in {
@@ -389,10 +409,15 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         default_losses: Tensor,
         positive_losses: Tensor,
         negative_losses: Tensor,
+        max_gain: Optional[float] = None,
     ) -> Tensor:
         """Match negative degradation to the finite positive improvement."""
 
-        positive_gain = default_losses.detach() - positive_losses.detach()
+        positive_gain = (
+            default_losses.detach() - positive_losses.detach()
+        ).clamp_min(0.0)
+        if max_gain is not None:
+            positive_gain = positive_gain.clamp_max(float(max_gain))
         negative_effect = negative_losses - default_losses.detach()
         return F.smooth_l1_loss(negative_effect, positive_gain)
 
@@ -503,6 +528,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             default_losses,
             positive_losses,
             negative_losses,
+            _cfg_get(
+                self.objective_cfg,
+                "suppression_symmetry_max_gain",
+                None,
+            ),
         )
         contrastive_cfg = _cfg_get(
             self.objective_cfg,
@@ -821,6 +851,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 default_losses,
                 positive_result["sample_losses"],
                 negative_losses,
+                _cfg_get(
+                    self.objective_cfg,
+                    "suppression_symmetry_max_gain",
+                    None,
+                ),
             )
             intervention_energy = negative_result["intervention_energy"]
             intervention_budget_excess = self._intervention_budget_excess(

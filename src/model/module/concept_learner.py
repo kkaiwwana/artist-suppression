@@ -10,9 +10,12 @@ values.  A caller selects a known concept and one of three directions:
 ``-1``
     Subtract that same direction for an explicit copyright suppression request.
 
-Concept directions are centered against artists that share coarse genres.  A
-direction is decoded as ``decoder(artist) - decoder(genre peers)`` so shared
-musical structure and decoder biases cancel before it reaches MusicGen.
+Concept directions are centered against a local neighbourhood of artists with
+similar decoded residuals. A direction is
+``decoder(artist) - weighted_mean(decoder(similar artists))`` so shared musical
+structure and decoder biases cancel before it reaches MusicGen. Similarities
+are maintained as a detached exponential-moving-average (EMA), preventing the
+condition bank from gaming its own neighbour assignments.
 Per-block gates are parameterized through a bounded ``tanh`` map so training
 cannot grow their effective magnitude without limit. Before injection, a
 direction whose RMS exceeds the incoming hidden-state RMS is clipped down.
@@ -41,7 +44,7 @@ class ConceptCondition:
 
     Attributes:
         weights: Selected concept mixture, ``[batch, num_concepts]``.
-        peer_weights: Genre-matched reference mixture with the selected
+        peer_weights: Detached local-reference mixture with the selected
             concepts excluded, ``[batch, num_concepts]``.
         direction: Per-sample signed strength: zero, positive, or negative.
         active: One when a non-empty concept selection is present.
@@ -122,16 +125,20 @@ class _ConditionOnlyStyleDecoder(nn.Module):
 
 
 class ConceptLearner(nn.Module):
-    """Learn explicit genre-centered concept directions.
+    """Learn explicit similarity-centered concept directions.
 
-    ``group_matrix`` is an optional ``[num_concepts, num_groups]`` artist-to-
-    genre membership matrix.  Rows may be multi-hot or soft; they are
-    normalized internally.  When omitted, every other concept is a peer.
+    Similarity is computed in the space that is actually injected into
+    MusicGen: decoded artist residuals, centered across artists and averaged
+    over enabled intervention blocks. Top-k softmax neighbours form a local
+    musical reference for each artist. ``"genre"`` and ``"uniform"`` peer
+    modes remain available for controlled ablations.
 
     The model is intentionally additive and condition-only.  There is no text
     router, hidden-state router, replacement predictor, or runtime concept
     availability state.
     """
+
+    SUPPORTED_PEER_MODES = {"similarity", "genre", "uniform"}
 
     def __init__(
         self,
@@ -149,6 +156,11 @@ class ConceptLearner(nn.Module):
         normalize_intervention: Optional[bool] = None,
         intervention_norm_epsilon: float = 1e-12,
         intervention_blocks: Optional[Sequence[int]] = None,
+        peer_mode: str = "similarity",
+        peer_top_k: int = 8,
+        peer_temperature: float = 0.2,
+        peer_similarity_momentum: float = 0.95,
+        peer_warmup_steps: int = 0,
         group_matrix: Optional[Sequence[Sequence[float]] | Tensor] = None,
     ) -> None:
         super().__init__()
@@ -168,12 +180,30 @@ class ConceptLearner(nn.Module):
             )
         if not concept_name.strip():
             raise ValueError("concept_name must not be empty")
+        if peer_mode not in self.SUPPORTED_PEER_MODES:
+            raise ValueError(
+                f"peer_mode must be one of {self.SUPPORTED_PEER_MODES}, "
+                f"got {peer_mode!r}"
+            )
+        if peer_top_k <= 0:
+            raise ValueError("peer_top_k must be positive")
+        if peer_temperature <= 0:
+            raise ValueError("peer_temperature must be positive")
+        if not 0.0 <= peer_similarity_momentum < 1.0:
+            raise ValueError("peer_similarity_momentum must be in [0, 1)")
+        if peer_warmup_steps < 0:
+            raise ValueError("peer_warmup_steps must be non-negative")
 
         self.num_concepts = int(num_concepts)
         self.hidden_dim = int(hidden_dim)
         self.style_dim = int(style_dim)
         self.num_blocks = int(num_blocks)
         self.concept_name = concept_name
+        self.peer_mode = peer_mode
+        self.peer_top_k = int(peer_top_k)
+        self.peer_temperature = float(peer_temperature)
+        self.peer_similarity_momentum = float(peer_similarity_momentum)
+        self.peer_warmup_steps = int(peer_warmup_steps)
         self.max_block_scale = float(max_block_scale)
         if (
             cap_intervention_rms is not None
@@ -230,13 +260,50 @@ class ConceptLearner(nn.Module):
             "group_matrix",
             self._prepare_group_matrix(group_matrix),
         )
+        # These buffers make a resumed run preserve its neighbour assignments.
+        # `_load_from_state_dict` supplies defaults for older checkpoints.
+        self.register_buffer(
+            "peer_similarity_ema",
+            torch.zeros(self.num_concepts, self.num_concepts),
+        )
+        self.register_buffer(
+            "peer_similarity_updates",
+            torch.zeros((), dtype=torch.long),
+        )
 
     def extra_repr(self) -> str:
         return (
             f"concept_name={self.concept_name!r}, "
             f"num_concepts={self.num_concepts}, num_blocks={self.num_blocks}, "
+            f"peer_mode={self.peer_mode!r}, peer_top_k={self.peer_top_k}, "
             f"max_block_scale={self.max_block_scale}, "
             f"cap_intervention_rms={self.cap_intervention_rms}"
+        )
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        """Load pre-similarity checkpoints without manufacturing key errors."""
+
+        for name in ("peer_similarity_ema", "peer_similarity_updates"):
+            key = prefix + name
+            if key not in state_dict:
+                state_dict[key] = getattr(self, name).detach().clone()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )
 
     @property
@@ -300,14 +367,158 @@ class ConceptLearner(nn.Module):
             dtype=self.style_bank.embeddings.weight.dtype
         )
 
+    def _decoded_concept_residuals(
+        self,
+        block_index: int,
+        *,
+        detach_styles: bool = False,
+    ) -> Tensor:
+        """Decode all artist conditions at one block as ``[N, hidden_dim]``."""
+
+        self._validate_block_index(block_index)
+        styles = self.style_bank.deterministic_embeddings
+        if detach_styles:
+            styles = styles.detach()
+        depth = self.depth_embeddings.weight[block_index].unsqueeze(0).expand(
+            self.num_concepts,
+            -1,
+        )
+        residuals = self.style_decoder(
+            styles,
+            depth,
+            torch.Size((self.num_concepts, 1, self.hidden_dim)),
+        )
+        return residuals[:, 0, :]
+
+    def _decoded_peer_residual(
+        self,
+        peer_weights: Tensor,
+        block_index: int,
+        hidden_state: Tensor,
+    ) -> Tensor:
+        """Decode only unique top-k peers used by the current batch."""
+
+        used = torch.nonzero(
+            peer_weights.detach().sum(dim=0) > 0,
+            as_tuple=False,
+        ).flatten()
+        if used.numel() == 0:
+            return torch.zeros_like(hidden_state)
+
+        styles = self.style_bank.deterministic_embeddings.index_select(
+            0,
+            used.to(self.style_bank.deterministic_embeddings.device),
+        ).detach()
+        depth = self.depth_embeddings.weight[block_index].unsqueeze(0).expand(
+            used.numel(),
+            -1,
+        )
+        decoded = self.style_decoder(
+            styles,
+            depth,
+            torch.Size((used.numel(), 1, self.hidden_dim)),
+        )[:, 0, :].to(hidden_state)
+        local_weights = peer_weights.detach().index_select(
+            1,
+            used.to(peer_weights.device),
+        )
+        peer_vector = local_weights @ decoded
+        peer_shape = (peer_vector.shape[0],) + (1,) * (
+            hidden_state.ndim - 2
+        ) + (peer_vector.shape[-1],)
+        return peer_vector.view(peer_shape).expand_as(hidden_state)
+
+    @torch.no_grad()
+    def refresh_peer_similarity(self) -> Tensor:
+        """Refresh the detached EMA of decoded-residual cosine similarities."""
+
+        enabled_blocks = torch.nonzero(
+            self.intervention_mask,
+            as_tuple=False,
+        ).flatten()
+        if enabled_blocks.numel() == 0:
+            current = self.peer_similarity_ema.new_zeros(
+                self.num_concepts,
+                self.num_concepts,
+            )
+        else:
+            similarities = []
+            for block_index in enabled_blocks.tolist():
+                residuals = self._decoded_concept_residuals(block_index).float()
+                # Remove a decoder-wide/common-music component before asking
+                # which artist-specific residuals are close to one another.
+                residuals = residuals - residuals.mean(dim=0, keepdim=True)
+                residuals = F.normalize(residuals, dim=-1, eps=1e-8)
+                similarities.append(residuals @ residuals.transpose(0, 1))
+            current = torch.stack(similarities).mean(dim=0).to(
+                self.peer_similarity_ema
+            )
+
+        if int(self.peer_similarity_updates.item()) == 0:
+            self.peer_similarity_ema.copy_(current)
+        else:
+            self.peer_similarity_ema.mul_(self.peer_similarity_momentum).add_(
+                current,
+                alpha=1.0 - self.peer_similarity_momentum,
+            )
+        self.peer_similarity_updates.add_(1)
+        return self.peer_similarity_ema
+
+    def _uniform_peer_matrix(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+        if self.num_concepts == 1:
+            return torch.zeros(1, 1, device=device, dtype=dtype)
+        matrix = torch.ones(
+            self.num_concepts,
+            self.num_concepts,
+            device=device,
+            dtype=dtype,
+        )
+        matrix.fill_diagonal_(0.0)
+        return self._normalise(matrix)
+
+    def _similarity_peer_matrix(self, weights: Tensor) -> Tensor:
+        """Return a detached top-k softmax neighbour matrix."""
+
+        if self.num_concepts == 1:
+            return weights.new_zeros(1, 1)
+        if int(self.peer_similarity_updates.item()) == 0:
+            self.refresh_peer_similarity()
+        if int(self.peer_similarity_updates.item()) <= self.peer_warmup_steps:
+            return self._uniform_peer_matrix(
+                device=weights.device,
+                dtype=weights.dtype,
+            )
+
+        similarity = self.peer_similarity_ema.detach().to(weights)
+        similarity = similarity.clone()
+        similarity.fill_diagonal_(-torch.inf)
+        top_k = min(self.peer_top_k, self.num_concepts - 1)
+        values, indices = torch.topk(similarity, k=top_k, dim=-1)
+        local_weights = torch.softmax(
+            values / self.peer_temperature,
+            dim=-1,
+        )
+        peers = torch.zeros_like(similarity)
+        peers.scatter_(1, indices, local_weights)
+        return peers.detach()
+
+    def _genre_affinity(self, weights: Tensor) -> Tensor:
+        """Return the legacy genre affinity for controlled ablations."""
+
+        if self.group_matrix.shape[1] == 0:
+            return torch.ones_like(weights)
+        groups = self.group_matrix.to(weights)
+        profile = self._normalise(weights @ groups)
+        return profile @ groups.transpose(0, 1)
+
     def _peer_weights(self, weights: Tensor) -> Tensor:
-        """Return genre-matched peers while excluding selected concepts."""
+        """Return local peers while excluding explicitly selected concepts."""
 
         selected = weights.gt(0)
-        if self.group_matrix.shape[1] > 0:
-            groups = self.group_matrix.to(weights)
-            profile = self._normalise(weights @ groups)
-            affinity = profile @ groups.transpose(0, 1)
+        if self.peer_mode == "similarity":
+            affinity = weights @ self._similarity_peer_matrix(weights)
+        elif self.peer_mode == "genre":
+            affinity = self._genre_affinity(weights)
         else:
             affinity = torch.ones_like(weights)
         affinity = affinity.masked_fill(selected, 0.0)
@@ -539,16 +750,21 @@ class ConceptLearner(nn.Module):
         depth = self.depth_embeddings.weight[block_index].to(hidden_state)
         depth = depth.unsqueeze(0).expand(hidden_state.shape[0], -1)
         target_style = self.style_bank(weights).to(hidden_state)
-        peer_style = self.style_bank(peer_weights).to(hidden_state)
         target_residual = self.style_decoder(
             target_style,
             depth,
             hidden_state.shape,
         )
-        peer_residual = self.style_decoder(
-            peer_style,
-            depth,
-            hidden_state.shape,
+        # Average *decoded* neighbour residuals. This deliberately differs
+        # from decoding the average embedding because the decoder is nonlinear.
+        # Neighbour embeddings and weights are detached so artist j cannot win
+        # by moving its references; the shared decoder/depth path stays
+        # differentiable so common decoder biases cancel in both value and
+        # gradient.
+        peer_residual = self._decoded_peer_residual(
+            peer_weights,
+            block_index,
+            hidden_state,
         )
         concept_residual = target_residual - peer_residual
         row_shape = (hidden_state.shape[0],) + (1,) * (hidden_state.ndim - 1)
@@ -596,11 +812,31 @@ class ConceptLearner(nn.Module):
             dtype=embeddings.dtype,
         )
         peer_weights = self._peer_weights(identity)
-        centered = embeddings - peer_weights @ embeddings
+        centered = embeddings - (peer_weights @ embeddings.detach())
+        off_diagonal = ~torch.eye(
+            self.num_concepts,
+            device=self.peer_similarity_ema.device,
+            dtype=torch.bool,
+        )
+        similarity_values = self.peer_similarity_ema[off_diagonal]
+        peer_entropy = -(
+            peer_weights.clamp_min(1e-12)
+            * peer_weights.clamp_min(1e-12).log()
+        ).sum(dim=-1).mean()
         return {
             "style_bank_l2": embeddings.square().mean(),
             "concept_center": centered.mean(dim=0).square().mean(),
             "concept_spread_monitor": centered.square().mean(),
+            "peer_similarity_mean_monitor": similarity_values.mean()
+            if similarity_values.numel()
+            else embeddings.new_zeros(()),
+            "peer_similarity_max_monitor": similarity_values.max()
+            if similarity_values.numel()
+            else embeddings.new_zeros(()),
+            "peer_entropy_monitor": peer_entropy,
+            "peer_similarity_updates_monitor": embeddings.new_tensor(
+                float(self.peer_similarity_updates.item())
+            ),
         }
 
     def compute_losses(
