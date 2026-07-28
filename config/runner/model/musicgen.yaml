@@ -14,7 +14,7 @@ model_cfg:
     adapter_attention_types: [encoder_attn]
     # null adapts all 24 decoder layers. Override with e.g. [18,19,20,21,22,23].
     adapter_layers: [18, 19, 20, 21, 22, 23]
-    adapter_dropout: 0.0
+    adapter_dropout: 0.05
     adapter_zero_init: true
     # Match the original AudioCraft pretraining/generation factorisation.
     # Set false only to reproduce historical synchronous-teacher-forcing runs.
@@ -30,8 +30,8 @@ model_cfg:
   test_generation:
     do_sample: true
     guidance_scale: 3.0
-    top_k: 250
-    temperature: 1.0
+    # top_k: 250
+    # temperature: 1.0
     max_new_tokens: 512
 
 log_backend: wandb

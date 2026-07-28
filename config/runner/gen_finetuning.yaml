@@ -23,7 +23,7 @@ optimizer:
   name: AdamW
   optimizer_params:
     # Only the randomly initialized explicit controller trains by default.
-    lr: 1e-4
+    lr: 8e-5
     weight_decay: 0
 
 
