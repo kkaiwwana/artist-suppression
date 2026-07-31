@@ -9,6 +9,10 @@ training caption and produces a paired trio with identical sampling seeds:
 
 The output manifest is directly consumable by ArtistClassificationDataModule.
 Interrupted runs resume at complete trio boundaries by default.
+
+With ``--continuation``, each trio receives the same prefix from its source
+clip as an EnCodec audio prompt. The decoded real prefix is removed before
+storage, so downstream metrics see only the newly generated continuation.
 """
 
 from __future__ import annotations
@@ -49,6 +53,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--groups-per-artist", type=int, default=2)
     parser.add_argument("--duration-seconds", type=float, default=15.0)
+    parser.add_argument(
+        "--continuation",
+        action="store_true",
+        help=(
+            "Condition generation on the beginning of each source clip. Only "
+            "the newly generated continuation is saved."
+        ),
+    )
+    parser.add_argument(
+        "--audio-prompt-seconds",
+        type=float,
+        default=5.0,
+        help="Source-audio prefix length used when --continuation is enabled.",
+    )
+    parser.add_argument(
+        "--continuation-seconds",
+        type=float,
+        default=10.0,
+        help="Generated tail length saved when --continuation is enabled.",
+    )
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--max-artists", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
@@ -113,15 +137,98 @@ def _audio_frame_rate(model: Any) -> float:
     return 50.0
 
 
-def _default_output_dir(checkpoint: Path) -> Path:
+def _duration_slug(seconds: float) -> str:
+    return f"{float(seconds):g}".replace(".", "p")
+
+
+def _default_output_dir(
+    checkpoint: Path,
+    *,
+    continuation: bool = False,
+    audio_prompt_seconds: float = 5.0,
+    continuation_seconds: float = 10.0,
+) -> Path:
     checkpoint = checkpoint.expanduser().resolve()
     run_name = checkpoint.parent.parent.name
-    return (
+    root = (
         PROJECT_ROOT
         / "evaluation_outputs"
         / "classifier_audio"
         / run_name
         / checkpoint.stem
+    )
+    if not continuation:
+        return root
+    suffix = (
+        f"continuation_p{_duration_slug(audio_prompt_seconds)}"
+        f"_c{_duration_slug(continuation_seconds)}"
+    )
+    return root / suffix
+
+
+def _with_audio_continuation_prompt(
+    batch: Mapping[str, Any],
+    *,
+    prompt_frames: int,
+) -> dict[str, Any]:
+    """Attach fixed-length EnCodec prompt tokens as generation inputs."""
+
+    if prompt_frames <= 0:
+        raise ValueError("prompt_frames must be positive")
+    audio_tokens = batch.get("audio_tokens")
+    if not isinstance(audio_tokens, torch.Tensor) or audio_tokens.ndim != 3:
+        raise ValueError("continuation requires audio_tokens shaped [B,Q,T]")
+    decoder_mask = batch.get("decoder_attention_mask")
+    if not isinstance(decoder_mask, torch.Tensor) or decoder_mask.ndim != 2:
+        raise ValueError(
+            "continuation requires decoder_attention_mask shaped [B,T]"
+        )
+    if audio_tokens.shape[0] != decoder_mask.shape[0]:
+        raise ValueError("audio token and decoder-mask batch sizes do not match")
+    valid_frames = decoder_mask.long().sum(dim=-1)
+    if torch.any(valid_frames < prompt_frames):
+        shortest = int(valid_frames.min().item())
+        raise ValueError(
+            f"audio prompt needs {prompt_frames} token frames but the shortest "
+            f"source clip has {shortest}"
+        )
+    batch_size, codebooks, _ = audio_tokens.shape
+    decoder_input_ids = audio_tokens[..., :prompt_frames].reshape(
+        batch_size * codebooks,
+        prompt_frames,
+    )
+    generation_inputs = {
+        "input_ids": batch["input_ids"],
+        "attention_mask": batch["attention_mask"],
+        "decoder_input_ids": decoder_input_ids.contiguous(),
+    }
+    prompted = dict(batch)
+    prompted["generation_inputs"] = generation_inputs
+    return prompted
+
+
+def _only_generated_continuation(
+    audio: torch.Tensor,
+    *,
+    sample_rate: int,
+    prompt_seconds: float,
+    continuation_seconds: float,
+) -> torch.Tensor:
+    """Remove the decoded real prefix and retain an exact generated tail."""
+
+    if audio.ndim == 2:
+        audio = audio.unsqueeze(1)
+    if audio.ndim != 3:
+        raise ValueError("audio must have shape [B,T] or [B,C,T]")
+    prompt_samples = int(round(float(prompt_seconds) * int(sample_rate)))
+    if prompt_samples <= 0 or prompt_samples >= audio.shape[-1]:
+        raise ValueError(
+            "generated audio is not longer than its requested audio prompt"
+        )
+    return fixed_audio_duration(
+        audio[..., prompt_samples:],
+        sample_rate,
+        continuation_seconds,
     )
 
 
@@ -148,12 +255,26 @@ def main() -> None:
         raise ValueError("groups-per-artist and batch-size must be positive")
     if args.duration_seconds <= 0:
         raise ValueError("duration-seconds must be positive")
+    if args.audio_prompt_seconds <= 0 or args.continuation_seconds <= 0:
+        raise ValueError(
+            "audio-prompt-seconds and continuation-seconds must be positive"
+        )
+
+    generation_mode = "continuation" if args.continuation else "text"
+    output_duration_seconds = (
+        args.continuation_seconds if args.continuation else args.duration_seconds
+    )
 
     checkpoint = args.checkpoint.expanduser().resolve()
     output_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir is not None
-        else _default_output_dir(checkpoint)
+        else _default_output_dir(
+            checkpoint,
+            continuation=args.continuation,
+            audio_prompt_seconds=args.audio_prompt_seconds,
+            continuation_seconds=args.continuation_seconds,
+        )
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.jsonl"
@@ -168,16 +289,26 @@ def main() -> None:
                 f"output directory belongs to checkpoint {existing_checkpoint}; "
                 "choose another --output-dir or pass --overwrite"
             )
-        for field, expected in {
+        resume_settings = {
             "groups_per_artist": args.groups_per_artist,
-            "duration_seconds": args.duration_seconds,
+            "duration_seconds": output_duration_seconds,
             "seed": args.seed,
             "max_artists": args.max_artists,
-        }.items():
-            if existing_metadata.get(field) != expected:
+            "generation_mode": generation_mode,
+            "audio_prompt_seconds": (
+                args.audio_prompt_seconds if args.continuation else 0.0
+            ),
+        }
+        for field, expected in resume_settings.items():
+            existing = existing_metadata.get(field)
+            if field == "generation_mode" and existing is None:
+                existing = "text"
+            if field == "audio_prompt_seconds" and existing is None:
+                existing = 0.0
+            if existing != expected:
                 raise ValueError(
                     f"resume setting {field}={expected!r} differs from existing "
-                    f"{existing_metadata.get(field)!r}; pass --overwrite"
+                    f"{existing!r}; pass --overwrite"
                 )
     if args.overwrite:
         manifest_path.write_text("", encoding="utf-8")
@@ -208,8 +339,19 @@ def main() -> None:
     jobs = [job for job in jobs if job.group_id not in completed]
 
     frame_rate = _audio_frame_rate(model)
+    prompt_frames = (
+        max(1, int(round(args.audio_prompt_seconds * frame_rate)))
+        if args.continuation
+        else 0
+    )
+    encoded_prompt_seconds = (
+        prompt_frames / frame_rate if args.continuation else 0.0
+    )
+    generated_seconds = (
+        args.continuation_seconds if args.continuation else args.duration_seconds
+    )
     max_new_tokens = args.max_new_tokens or int(
-        math.ceil(args.duration_seconds * frame_rate)
+        math.ceil(generated_seconds * frame_rate)
         + int(getattr(model.model, "num_codebooks", 1) or 1)
     )
     generation_kwargs = {
@@ -250,7 +392,17 @@ def main() -> None:
         "num_artists": len(vocabulary),
         "groups_per_artist": args.groups_per_artist,
         "max_artists": args.max_artists,
-        "duration_seconds": args.duration_seconds,
+        "duration_seconds": output_duration_seconds,
+        "generation_mode": generation_mode,
+        "audio_prompt_seconds": (
+            args.audio_prompt_seconds if args.continuation else 0.0
+        ),
+        "encoded_audio_prompt_seconds": encoded_prompt_seconds,
+        "prompt_token_frames": prompt_frames,
+        "continuation_seconds": (
+            args.continuation_seconds if args.continuation else None
+        ),
+        "saved_audio_contains_prompt": False,
         "sample_rate": sample_rate,
         "generation_kwargs": generation_kwargs,
         "seed": args.seed,
@@ -265,7 +417,18 @@ def main() -> None:
     print(f"Checkpoint config: {config_path}")
     print(f"Artists in checkpoint vocabulary: {len(vocabulary)}")
     print(f"Pending groups: {len(jobs)}; completed groups: {len(completed)}")
-    print(f"Audio duration: {args.duration_seconds:.2f}s; max_new_tokens: {max_new_tokens}")
+    if args.continuation:
+        print(
+            f"Generation mode: continuation "
+            f"({args.audio_prompt_seconds:.2f}s prompt + "
+            f"{args.continuation_seconds:.2f}s saved continuation)"
+        )
+    else:
+        print(f"Generation mode: text ({args.duration_seconds:.2f}s)")
+    print(
+        f"Saved audio duration: {output_duration_seconds:.2f}s; "
+        f"max_new_tokens: {max_new_tokens}"
+    )
     print(f"Output: {output_dir}")
     if not jobs:
         return
@@ -277,6 +440,11 @@ def main() -> None:
             chunk = jobs[start : start + args.batch_size]
             samples = [dataset[job.dataset_index] for job in chunk]
             batch = _move_batch(datamodule._collator(samples), device)
+            if args.continuation:
+                batch = _with_audio_continuation_prompt(
+                    batch,
+                    prompt_frames=prompt_frames,
+                )
             target_ids = torch.tensor(
                 [job.artist_index for job in chunk], device=device, dtype=torch.long
             )
@@ -305,27 +473,60 @@ def main() -> None:
                 other_audio = model._generate_with_condition(
                     batch, generation_kwargs, other_condition
                 )
-            audio_by_type = {
-                "default": fixed_audio_duration(
-                    default_audio, sample_rate, args.duration_seconds
-                ),
-                "suppress_self": fixed_audio_duration(
-                    self_audio, sample_rate, args.duration_seconds
-                ),
-                "suppress_other": fixed_audio_duration(
-                    other_audio, sample_rate, args.duration_seconds
-                ),
+            generated_by_type = {
+                "default": default_audio,
+                "suppress_self": self_audio,
+                "suppress_other": other_audio,
             }
+            if args.continuation:
+                audio_by_type = {
+                    sample_type: _only_generated_continuation(
+                        audio,
+                        sample_rate=sample_rate,
+                        prompt_seconds=encoded_prompt_seconds,
+                        continuation_seconds=args.continuation_seconds,
+                    )
+                    for sample_type, audio in generated_by_type.items()
+                }
+            else:
+                audio_by_type = {
+                    sample_type: fixed_audio_duration(
+                        audio,
+                        sample_rate,
+                        args.duration_seconds,
+                    )
+                    for sample_type, audio in generated_by_type.items()
+                }
             for row_index, (job, sample) in enumerate(zip(chunk, samples)):
                 rows = manifest_rows_for_job(
                     job,
                     text=str(sample["text"]),
                     source_metadata=sample["metadata"],
                     sample_rate=sample_rate,
-                    duration_seconds=args.duration_seconds,
+                    duration_seconds=output_duration_seconds,
                     batch_seed=seed,
                 )
                 for row in rows:
+                    row.update(
+                        {
+                            "generation_mode": generation_mode,
+                            "audio_prompt_seconds": (
+                                args.audio_prompt_seconds
+                                if args.continuation
+                                else 0.0
+                            ),
+                            "encoded_audio_prompt_seconds": (
+                                encoded_prompt_seconds
+                            ),
+                            "continuation_seconds": (
+                                args.continuation_seconds
+                                if args.continuation
+                                else None
+                            ),
+                            "prompt_token_frames": prompt_frames,
+                            "saved_audio_contains_prompt": False,
+                        }
+                    )
                     destination = output_dir / str(row["audio"])
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     waveform = audio_by_type[str(row["sample_type"])][
