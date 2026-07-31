@@ -1,10 +1,9 @@
 """Raw-audio datasets for transferred artist classification.
 
-The training and ordinary validation splits are reconstructed from the same
-JamendoMaxCaps selection used by an unlearning checkpoint.  Three optional
-generated validation sets measure accuracy under default, self-suppressed,
-and unrelated-suppression generation without mixing classifier code into the
-unlearning model.
+The training and ordinary validation splits are reconstructed from a
+JamendoMaxCaps selection. An optional generated validation set measures
+accuracy on ordinary (non-suppressed) model generations. Suppression outputs
+remain available for separate post-training evaluation.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from src.data.jmd_max_caps import (
 )
 
 
-GENERATED_SAMPLE_TYPES = ("default", "suppress_self", "suppress_other")
+GENERATED_VALIDATION_SAMPLE_TYPES = ("default",)
 SOURCE_SELECTION_KEYS = (
     "subset_dir",
     "manifest_path",
@@ -183,7 +182,7 @@ class MERTAudioCollator:
 
 
 class ArtistClassificationDataModule(pl.LightningDataModule):
-    """Train on GT audio and validate on GT plus three generated branches."""
+    """Train on GT audio and validate on GT plus ordinary generations."""
 
     def __init__(
         self,
@@ -191,6 +190,8 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
         *,
         manifest_path: str | Path | None = None,
         generated_audio_dir: str | Path | None = None,
+        require_generated_validation: bool = False,
+        generated_validation_sample_types: Sequence[str] = ("default",),
         source_checkpoint_path: str | Path | None = None,
         source_config_path: str | Path | None = None,
         inherit_source_selection: bool = True,
@@ -234,6 +235,22 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
             if generated_audio_dir
             else None
         )
+        self.require_generated_validation = bool(require_generated_validation)
+        requested_sample_types = tuple(
+            str(sample_type) for sample_type in generated_validation_sample_types
+        )
+        if not requested_sample_types:
+            raise ValueError("generated_validation_sample_types cannot be empty")
+        unknown_sample_types = sorted(
+            set(requested_sample_types) - set(GENERATED_VALIDATION_SAMPLE_TYPES)
+        )
+        if unknown_sample_types:
+            raise ValueError(
+                "unsupported generated validation sample types: "
+                f"{unknown_sample_types}; only ordinary default generation is "
+                "validated during classifier training"
+            )
+        self.generated_validation_sample_types = requested_sample_types
         self.source_checkpoint_path = source_checkpoint_path
         self.source_config_path = source_config_path
         self.inherit_source_selection = bool(inherit_source_selection)
@@ -354,11 +371,19 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
 
     def _generated_records(self) -> dict[str, list[dict[str, Any]]]:
         if self.generated_audio_dir is None:
+            if self.require_generated_validation:
+                raise ValueError(
+                    "generated validation is required but generated_audio_dir "
+                    "is unset; export CLASSIFIER_GENERATED_DIR or override "
+                    "runner.dataset.require_generated_validation=false"
+                )
             return {}
         manifest = self.generated_audio_dir / "manifest.jsonl"
         if not manifest.is_file():
             raise FileNotFoundError(manifest)
-        grouped = {sample_type: [] for sample_type in GENERATED_SAMPLE_TYPES}
+        grouped = {
+            sample_type: [] for sample_type in self.generated_validation_sample_types
+        }
         for row in _load_jsonl(manifest):
             sample_type = str(row.get("sample_type", ""))
             if sample_type not in grouped:
@@ -366,14 +391,29 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
             key = _artist_key(row)
             if key not in self.vocabulary.artist_to_index:
                 raise ValueError(f"generated manifest contains unknown artist {key!r}")
-            expected = self.vocabulary.artist_to_index[key]
-            supplied = row.get("artist_index")
-            if supplied is not None and int(supplied) != expected:
+            # ``artist_index`` in the generated manifest belongs to the
+            # control checkpoint's concept vocabulary. A classifier may use a
+            # larger class universe, so its label must be remapped by stable
+            # artist_key rather than comparing unrelated integer namespaces.
+            mapped = dict(row)
+            mapped["control_artist_index"] = row.get("artist_index")
+            mapped["classifier_artist_index"] = int(
+                self.vocabulary.artist_to_index[key]
+            )
+            grouped[sample_type].append(mapped)
+        available = {key: rows for key, rows in grouped.items() if rows}
+        if self.require_generated_validation:
+            missing_types = [
+                sample_type
+                for sample_type in self.generated_validation_sample_types
+                if sample_type not in available
+            ]
+            if missing_types:
                 raise ValueError(
-                    f"artist-index mismatch for {key}: generated={supplied}, GT={expected}"
+                    "generated manifest is missing required sample types: "
+                    f"{missing_types}"
                 )
-            grouped[sample_type].append(row)
-        return {key: rows for key, rows in grouped.items() if rows}
+        return available
 
     def setup(self, stage: str | None = None) -> None:
         del stage
@@ -515,6 +555,6 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
 __all__ = [
     "ArtistAudioDataset",
     "ArtistClassificationDataModule",
-    "GENERATED_SAMPLE_TYPES",
+    "GENERATED_VALIDATION_SAMPLE_TYPES",
     "MERTAudioCollator",
 ]

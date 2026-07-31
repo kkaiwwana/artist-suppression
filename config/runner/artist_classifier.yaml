@@ -5,13 +5,17 @@ metrics: []
 
 dataset:
   _target_: src.data.artist_classifier.ArtistClassificationDataModule
-  # If supplied, the exact subset filters and label vocabulary are inherited
-  # from this checkpoint's Hydra config. The generated run metadata is used as
-  # a second fallback, before the explicit defaults below.
+  # The classifier may intentionally use a larger class universe than the
+  # unlearning checkpoint (e.g. train 256-way, evaluate 64 controlled artists).
+  # Set inherit_source_selection=true only for an explicitly matched classifier.
   source_checkpoint_path: ${oc.env:UNLEARNING_CHECKPOINT,null}
   source_config_path: ${oc.env:UNLEARNING_CONFIG,null}
-  inherit_source_selection: true
+  inherit_source_selection: false
   generated_audio_dir: ${oc.env:CLASSIFIER_GENERATED_DIR,null}
+  # During training, evaluate real held-out audio and ordinary generations only.
+  # Suppression branches remain on disk for separate post-training evaluation.
+  generated_validation_sample_types: [default]
+  require_generated_validation: true
   subset_dir: ${oc.env:JAMENDO_SUBSET_DIR,datasets/jamendo_max_caps/subsets/signature_artists0256_songs064_seed0042}
   manifest_path: null
 
@@ -77,7 +81,7 @@ checkpoint:
   save_last: true
 
 # Audio comparison callbacks belong to the generative model and must not run
-# during classifier training. Generated-branch accuracies are logged instead.
+# during classifier training. Only default-generation accuracy is logged here.
 validation_audio:
   enabled: false
 

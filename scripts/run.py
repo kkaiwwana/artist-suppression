@@ -188,6 +188,12 @@ def main(config: DictConfig) -> None:
     Path(config.exp.save_dir).mkdir(exist_ok=True, parents=True)
 
     datamodule = setup_dataset(config)
+    selection_stats = getattr(datamodule, "selection_stats", None)
+    if selection_stats:
+        log.info("DataModule selection stats: %s", selection_stats)
+    validation_names = getattr(datamodule, "validation_names", None)
+    if validation_names:
+        log.info("Validation dataloaders: %s", list(validation_names))
     _set_scheduler_steps(config, len(datamodule.train_dataloader()))
     model = setup_model(config)
     logger = _wandb_logger(config)
