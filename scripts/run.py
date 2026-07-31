@@ -164,12 +164,10 @@ def _build_callbacks(config: DictConfig) -> list[pl.Callback]:
     )
     if not isinstance(comparison_cfg, dict):
         raise TypeError("runner.validation_audio must resolve to a mapping")
-    callbacks.extend(
-        [
-            LearningRateMonitor(logging_interval="step"),
-            ValidationAudioComparisonCallback(**comparison_cfg),
-        ]
-    )
+    comparison_enabled = bool(comparison_cfg.pop("enabled", True))
+    callbacks.append(LearningRateMonitor(logging_interval="step"))
+    if comparison_enabled:
+        callbacks.append(ValidationAudioComparisonCallback(**comparison_cfg))
     return callbacks
 
 

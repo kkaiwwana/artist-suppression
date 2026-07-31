@@ -122,6 +122,32 @@ def setup_dataset(config: DictConfig) -> pl.LightningDataModule:
                     "group_matrix"
                 ) in (None, "auto"):
                     learner_cfg["group_matrix"] = group_matrix.tolist()
+
+    # Resolve classifier output size and validation-loader names only after
+    # the raw-audio DataModule has reconstructed the checkpoint vocabulary.
+    if model_cfg is not None:
+        nested_model_cfg = model_cfg.get("model_cfg")
+        classifier_cfg = (
+            nested_model_cfg.get("classifier")
+            if nested_model_cfg is not None
+            else None
+        )
+        if classifier_cfg is not None and hasattr(datamodule, "num_classes"):
+            expected_classes = int(datamodule.num_classes)
+            configured_classes = classifier_cfg.get("num_classes")
+            with open_dict(classifier_cfg):
+                if configured_classes in (None, "auto"):
+                    classifier_cfg["num_classes"] = expected_classes
+                elif int(configured_classes) != expected_classes:
+                    raise ValueError(
+                        f"classifier num_classes={configured_classes} but the "
+                        f"DataModule built {expected_classes} classes"
+                    )
+            if nested_model_cfg.get("validation_names") in (None, "auto"):
+                with open_dict(nested_model_cfg):
+                    nested_model_cfg["validation_names"] = list(
+                        getattr(datamodule, "validation_names", ("gt",))
+                    )
     return datamodule
 
 

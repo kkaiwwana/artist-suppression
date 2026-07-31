@@ -1,5 +1,10 @@
 """Datasets and Lightning data modules."""
 
+from src.data.artist_classifier import (
+    ArtistAudioDataset,
+    ArtistClassificationDataModule,
+    MERTAudioCollator,
+)
 from src.data.dataset import JamendoMaxCapsDataModule
 from src.data.jmd_max_caps import (
     JamendoMaxCapsCollator,
@@ -13,10 +18,13 @@ from src.data.jmd_max_caps import (
 )
 
 __all__ = [
+    "ArtistAudioDataset",
+    "ArtistClassificationDataModule",
     "JamendoMaxCapsCollator",
     "JamendoMaxCapsDataModule",
     "JamendoMaxCapsDataset",
     "LabelVocabulary",
+    "MERTAudioCollator",
     "build_artist_genre_matrix",
     "build_label_vocabulary",
     "load_token_manifest",

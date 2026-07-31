@@ -1,0 +1,101 @@
+defaults:
+  - _self_
+
+metrics: []
+
+dataset:
+  _target_: src.data.artist_classifier.ArtistClassificationDataModule
+  # If supplied, the exact subset filters and label vocabulary are inherited
+  # from this checkpoint's Hydra config. The generated run metadata is used as
+  # a second fallback, before the explicit defaults below.
+  source_checkpoint_path: ${oc.env:UNLEARNING_CHECKPOINT,null}
+  source_config_path: ${oc.env:UNLEARNING_CONFIG,null}
+  inherit_source_selection: true
+  generated_audio_dir: ${oc.env:CLASSIFIER_GENERATED_DIR,null}
+  subset_dir: ${oc.env:JAMENDO_SUBSET_DIR,datasets/jamendo_max_caps/subsets/signature_artists0256_songs064_seed0042}
+  manifest_path: null
+
+  model_name_or_path: ${oc.env:MERT_MODEL,m-a-p/MERT-v1-95M}
+  local_files_only: ${oc.decode:${oc.env:HF_LOCAL_FILES_ONLY,false}}
+  sample_rate: 24000
+  duration_seconds: 15.0
+
+  artist_keys: null
+  genres: null
+  genre_field: coarse_genres
+  max_artists: 256
+  max_songs_per_artist: 64
+  max_clips_per_song: 2
+  max_samples: null
+  val_fraction: 0.05
+  test_fraction: 0.05
+  seed: ${exp.seed}
+
+  train_batch_size: 8
+  eval_batch_size: 8
+  num_workers: 8
+  eval_num_workers: 0
+  persistent_workers: true
+  pin_memory: true
+  prefetch_factor: 2
+  balance_artists: true
+
+model:
+  _target_: src.model.classifier.lightning.ArtistClassifierLightningModule
+  model_cfg:
+    classifier:
+      _target_: src.model.classifier.mert.MERTArtistClassifier
+      model_name_or_path: ${oc.env:MERT_MODEL,m-a-p/MERT-v1-95M}
+      num_classes: auto
+      local_files_only: ${oc.decode:${oc.env:HF_LOCAL_FILES_ONLY,false}}
+      trust_remote_code: true
+      # Linear-probe/MLP-head training is the safest first stage. Set
+      # unfreeze_last_n_layers > 0 for a later low-LR fine-tuning experiment.
+      freeze_backbone: true
+      unfreeze_last_n_layers: 0
+      use_weighted_layers: true
+      selected_layer: -1
+      classifier_hidden_dim: 512
+      dropout: 0.2
+      gradient_checkpointing: false
+    validation_names: auto
+  log_backend: wandb
+
+optimizer:
+  name: AdamW
+  optimizer_params:
+    lr: 0.0003
+    weight_decay: 0.01
+  backbone_lr: 0.00001
+
+scheduler: null
+
+checkpoint:
+  monitor: val/gt/top1
+  mode: max
+  save_top_k: 3
+  save_last: true
+
+# Audio comparison callbacks belong to the generative model and must not run
+# during classifier training. Generated-branch accuracies are logged instead.
+validation_audio:
+  enabled: false
+
+trainer:
+  max_epochs: 20
+  log_every_n_steps: 20
+  accelerator: auto
+  num_nodes: 1
+  devices: -1
+  precision: 16-mixed
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  val_check_interval: 1.0
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
+
+tags:
+  - artist_classifier
