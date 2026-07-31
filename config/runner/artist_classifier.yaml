@@ -10,8 +10,8 @@ dataset:
   # Set inherit_source_selection=true only for an explicitly matched classifier.
   source_checkpoint_path: ${oc.env:UNLEARNING_CHECKPOINT,null}
   source_config_path: ${oc.env:UNLEARNING_CONFIG,null}
-  inherit_source_selection: false
-  generated_audio_dir: ${oc.env:CLASSIFIER_GENERATED_DIR,null}
+  inherit_source_selection: true
+  generated_audio_dir: ${oc.env:CLASSIFIER_GENERATED_DIR,evaluation_outputs/classifier_audio/0728_091705@condition_learning_with_pretrained_adapter_1e-4lr/epoch002-step1035}
   # During training, evaluate real held-out audio and ordinary generations only.
   # Suppression branches remain on disk for separate post-training evaluation.
   generated_validation_sample_types: [default]
@@ -27,7 +27,7 @@ dataset:
   artist_keys: null
   genres: null
   genre_field: coarse_genres
-  max_artists: 256
+  max_artists: 64
   max_songs_per_artist: 64
   max_clips_per_song: 2
   max_samples: null

@@ -82,7 +82,7 @@ def _resolve_resume_checkpoint(value: str | None, logs_dir: Path) -> str | None:
     value = str(value).strip()
     if value.lower() == "last":
         candidates = sorted(
-            logs_dir.glob("**/checkpoints/last.ckpt"),
+            logs_dir.glob("**/ckpts/last.ckpt"),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -131,7 +131,7 @@ def _wandb_logger(config: DictConfig) -> WandbLogger:
 
 def _build_callbacks(config: DictConfig) -> list[pl.Callback]:
     checkpoint_cfg = config.runner.get("checkpoint", {})
-    checkpoint_dir = Path(config.exp.save_dir) / "checkpoints"
+    checkpoint_dir = Path(config.exp.save_dir) / "ckpts"
     best_checkpoint = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename="epoch{epoch:03d}-step{step}",
