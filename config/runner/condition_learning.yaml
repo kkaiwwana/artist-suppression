@@ -39,6 +39,9 @@ checkpoint:
   save_last: true
 
 validation_audio:
+  # The comprehensive fixed-cohort callback below supersedes this compact
+  # qualitative table for explicit-control training.
+  enabled: false
   every_n_epochs: 1
   num_samples: 2
   generation_seed: ${exp.seed}
@@ -56,9 +59,42 @@ validation_audio:
     # temperature: 1.0
     max_new_tokens: 250
 
+# Fixed, matched evaluation after every epoch: 4 artists x 16 clips x six
+# control scenarios. The classifier checkpoint must serialize
+# `artist_vocabulary`; external representation models download lazily.
+epoch_control_evaluation:
+  enabled: true
+  every_n_epochs: 1
+  num_artists: 4
+  clips_per_artist: 16
+  generation_batch_size: 16
+  metric_batch_size: 8
+  generation_seed: ${exp.seed}
+  cohort_seed: ${exp.seed}
+  audio_prompt_seconds: 5.0
+  continuation_seconds: 10.0
+  multi_min_artists: 2
+  multi_max_artists: 5
+  classifier_checkpoint_path: ${oc.env:ARTIST_CLASSIFIER_CHECKPOINT,null}
+  classifier_config_path: ${oc.env:ARTIST_CLASSIFIER_CONFIG,null}
+  classifier_model_name_or_path: ${oc.env:CLASSIFIER_MERT_MODEL,null}
+  mert_model_name_or_path: ${oc.env:MERT_MODEL,m-a-p/MERT-v1-95M}
+  clap_model_name_or_path: ${oc.env:CLAP_MODEL,laion/clap-htsat-unfused}
+  # false permits Hugging Face/Torch Hub/PaSST checkpoints to download online.
+  local_files_only: false
+  metric_device: null
+  log_key: evaluation/control_metrics
+  numeric_namespace: evaluation/control_metric_stats
+  fail_on_error: false
+  generation_kwargs:
+    do_sample: true
+    guidance_scale: 3.0
+    # top_k: 250
+    # temperature: 1.0
+
 
 trainer:
-  max_epochs: 20
+  max_epochs: 10
   log_every_n_steps: 10
 
   accelerator: auto

@@ -4,7 +4,9 @@ from .chroma_similarity import ChromaSimilarity
 from .clap_score import CLAPScore
 from .frechet_audio_distance import FrechetAudioDistance, MelStatsAudioEmbedding
 from .key_chord_agreement import ChordAgreement, KeyAgreement, KeyChordAgreement
+from .passt_kl_divergence import PaSSTKLDivergence
 from .tempo_error import TempoError
+from .vggish_embedding import VGGishAudioEmbedding
 
 __all__ = [
     "CLAPScore",
@@ -14,5 +16,7 @@ __all__ = [
     "KeyAgreement",
     "KeyChordAgreement",
     "MelStatsAudioEmbedding",
+    "PaSSTKLDivergence",
     "TempoError",
+    "VGGishAudioEmbedding",
 ]

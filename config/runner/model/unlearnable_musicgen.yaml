@@ -34,11 +34,11 @@ model_cfg:
     _target_: src.model.module.concept_learner.ConceptLearner
     num_concepts: auto
     hidden_dim: 1024
-    style_dim: 1024
+    style_dim: 512
     num_blocks: 24
     concept_name: auto
     controller_dim: 512
-    depth_dim: 256
+    depth_dim: 64
     initial_block_scale: 0.0
     # The learned raw parameter is mapped through tanh before injection. This
     # is a hard safety bound, not merely a regularizer.
@@ -93,6 +93,15 @@ model_cfg:
     # Clamp the target degradation even if +artist happens to produce a large
     # likelihood gain. A non-positive gain maps to zero in the implementation.
     suppression_symmetry_max_gain: 0.3
+    # On symmetry steps, independently replace half of the per-row negative
+    # controls with a normalized mixture that always contains the row's target
+    # artist. Sampling is reproducible from seed, epoch, and batch index.
+    multi_suppression:
+      enabled: true
+      probability: 0.5
+      min_total_artists: 2
+      max_total_artists: 5
+      seed: ${exp.seed}
     preservation:
       enabled: true
       weight: 1.0
@@ -111,8 +120,8 @@ model_cfg:
   test_generation:
     do_sample: true
     guidance_scale: 3.0
-    # top_k: 250
-    # temperature: 1.0
+    top_k: 250
+    temperature: 1.0
     max_new_tokens: 512
 
 log_backend: wandb

@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from src.metric.forgetting import GroundTruthNextTokenConfidence
 from src.model.base import BaseGenerationModel, _cfg_get, _instantiate_component
 from src.model.module.concept_learner import ConceptCondition
 
@@ -23,7 +24,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
 
     * default: no control, used as the stable reference;
     * positive: add artist A and improve A's teacher-forced likelihood;
-    * negative: subtract A and mirror the positive likelihood change;
+    * negative: subtract A, optionally with sampled artists, and mirror the
+      positive likelihood change;
     * preservation: subtract A while modeling a different artist B.
 
     The positive path stops at finite gain and wrong-artist margins. The
@@ -40,6 +42,12 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         "control_direction",
         "suppressed_artist_ids",
     }
+    GT_NTC_LOG_PATHS = {
+        "no_control": "monitor/train/gt_ntc/no_control",
+        "enhance_target": "monitor/train/gt_ntc/enhance_target",
+        "suppress_single_target": ("monitor/train/gt_ntc/suppress_single_target"),
+        "suppress_multiple_target": ("monitor/train/gt_ntc/suppress_multiple_target"),
+    }
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -54,12 +62,19 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             "intervention_scale",
             1.0,
         )
+        pad_token_id = getattr(self.model, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = 2048
+        self.gt_ntc_metrics = torch.nn.ModuleDict(
+            {
+                scenario: GroundTruthNextTokenConfidence(pad_token_id=int(pad_token_id))
+                for scenario in self.GT_NTC_LOG_PATHS
+            }
+        )
         self.validation_full_precision = bool(
             _cfg_get(self.model_cfg, "validation_full_precision", False)
         )
-        self.train_generator = bool(
-            _cfg_get(self.model_cfg, "train_generator", False)
-        )
+        self.train_generator = bool(_cfg_get(self.model_cfg, "train_generator", False))
         if not self.train_generator:
             self.model.requires_grad_(False)
             self.model.eval()
@@ -105,9 +120,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         preservation = _cfg_get(self.objective_cfg, "preservation", {})
         values["preservation.weight"] = _cfg_get(preservation, "weight", 1.0)
         contrastive = _cfg_get(self.objective_cfg, "artist_contrastive", {})
-        values["artist_contrastive.weight"] = _cfg_get(
-            contrastive, "weight", 0.0
-        )
+        values["artist_contrastive.weight"] = _cfg_get(contrastive, "weight", 0.0)
         values["losses.intervention_energy_weight"] = _cfg_get(
             self.loss_cfg, "intervention_energy_weight", 0.0
         )
@@ -138,6 +151,64 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 "losses.intervention_global_rms_budget must be non-negative"
             )
 
+        multi_suppression = _cfg_get(
+            self.objective_cfg,
+            "multi_suppression",
+            {},
+        )
+        multi_suppression_enabled = bool(_cfg_get(multi_suppression, "enabled", False))
+        probability = float(_cfg_get(multi_suppression, "probability", 0.5))
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError(
+                "control_training.multi_suppression.probability must be in [0, 1]"
+            )
+        min_artists = self._integer_config_value(
+            multi_suppression,
+            "min_total_artists",
+            2,
+        )
+        max_artists = self._integer_config_value(
+            multi_suppression,
+            "max_total_artists",
+            5,
+        )
+        seed = self._integer_config_value(
+            multi_suppression,
+            "seed",
+            0,
+        )
+        if min_artists < 2:
+            raise ValueError(
+                "control_training.multi_suppression.min_total_artists "
+                "must be at least 2"
+            )
+        if max_artists < min_artists:
+            raise ValueError(
+                "control_training.multi_suppression.max_total_artists "
+                "must be greater than or equal to min_total_artists"
+            )
+        num_concepts = int(self.concept_learner.num_concepts)
+        if multi_suppression_enabled and num_concepts < 2:
+            raise ValueError("multi-artist suppression requires at least two concepts")
+        if seed < 0:
+            raise ValueError(
+                "control_training.multi_suppression.seed must be non-negative"
+            )
+
+    @staticmethod
+    def _integer_config_value(
+        config: Any,
+        name: str,
+        default: int,
+    ) -> int:
+        value = _cfg_get(config, name, default)
+        integer = int(value)
+        if isinstance(value, bool) or float(value) != float(integer):
+            raise ValueError(
+                f"control_training.multi_suppression.{name} must be an integer"
+            )
+        return integer
+
     @staticmethod
     def _first(batch: Mapping[str, Any], *keys: str) -> Any:
         for key in keys:
@@ -162,12 +233,173 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             raise ValueError("artist targets must have shape [batch]")
         return targets.long()
 
+    def _scheduled_suppression_condition(
+        self,
+        targets: Tensor,
+        batch_idx: int,
+    ) -> Tuple[ConceptCondition, Tensor, Tensor]:
+        """Build deterministic row-wise single or joint suppression controls.
+
+        Joint controls are used only by the scheduled symmetry branch. Each
+        selected row contains its ground-truth artist plus distinct uniformly
+        sampled artists, and the resulting multi-hot weights sum to one. The
+        local generator is derived from the configured seed, epoch, and batch
+        index so resuming an epoch reproduces the same controls without
+        consuming PyTorch's global RNG state.
+
+        Returns the condition, fraction of joint rows, and mean number of
+        suppressed artists per row.
+        """
+
+        config = _cfg_get(self.objective_cfg, "multi_suppression", {})
+        enabled = bool(_cfg_get(config, "enabled", False))
+        if not enabled:
+            condition = self.concept_learner.suppression_condition(targets)
+            zero = condition.weights.new_zeros(())
+            one = condition.weights.new_ones(())
+            return condition, zero, one
+
+        probability = float(_cfg_get(config, "probability", 0.5))
+        min_artists = self._integer_config_value(
+            config,
+            "min_total_artists",
+            2,
+        )
+        max_artists = self._integer_config_value(
+            config,
+            "max_total_artists",
+            5,
+        )
+        base_seed = self._integer_config_value(config, "seed", 0)
+        trainer = getattr(self, "_trainer", None)
+        epoch = int(getattr(trainer, "current_epoch", 0)) if trainer is not None else 0
+        global_rank = (
+            int(getattr(trainer, "global_rank", 0)) if trainer is not None else 0
+        )
+        derived_seed = (
+            base_seed
+            + 1_000_003 * epoch
+            + 97_409 * int(batch_idx)
+            + 15_485_863 * global_rank
+        ) % ((1 << 63) - 1)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(derived_seed)
+
+        target_ids = targets.detach().to(device="cpu", dtype=torch.long)
+        num_concepts = int(self.concept_learner.num_concepts)
+        max_artists = min(max_artists, num_concepts)
+        min_artists = min(min_artists, max_artists)
+        if target_ids.numel() and (
+            (target_ids < 0).any() or (target_ids >= num_concepts).any()
+        ):
+            raise IndexError(f"concept ids must be in [0, {num_concepts})")
+
+        batch_size = int(target_ids.numel())
+        multi_rows = torch.rand(batch_size, generator=generator).lt(probability)
+        cardinalities = torch.ones(batch_size, dtype=torch.long)
+        if batch_size:
+            sampled = torch.randint(
+                min_artists,
+                max_artists + 1,
+                (batch_size,),
+                generator=generator,
+            )
+            cardinalities = torch.where(multi_rows, sampled, cardinalities)
+
+        weights = torch.zeros(batch_size, num_concepts, dtype=torch.float32)
+        all_concepts = torch.arange(num_concepts)
+        for row_index, (target, cardinality) in enumerate(
+            zip(target_ids.tolist(), cardinalities.tolist())
+        ):
+            candidates = all_concepts[all_concepts.ne(target)]
+            other_count = int(cardinality) - 1
+            selected = candidates[
+                torch.randperm(candidates.numel(), generator=generator)[:other_count]
+            ]
+            weights[row_index, target] = 1.0
+            weights[row_index, selected] = 1.0
+            weights[row_index].div_(float(cardinality))
+
+        condition = self.concept_learner.prepare_condition(
+            concept_weights=weights,
+            direction=-1.0,
+        )
+        multi_row_rate = multi_rows.to(condition.weights).mean()
+        mean_cardinality = cardinalities.to(condition.weights).mean()
+        return condition, multi_row_rate, mean_cardinality
+
     def _generator_batch(self, batch: Mapping[str, Any]) -> Dict[str, Any]:
         return {
             key: value
             for key, value in batch.items()
             if key not in self.CONTROL_BATCH_KEYS
         }
+
+    @torch.no_grad()
+    def _update_gt_ntc(
+        self,
+        scenario: str,
+        result: Mapping[str, Any],
+        *,
+        row_mask: Optional[Tensor] = None,
+    ) -> None:
+        """Update one online GT-NTC stream from an existing forward result."""
+
+        if scenario not in self.gt_ntc_metrics:
+            raise KeyError(f"unknown GT-NTC scenario: {scenario}")
+        logits = result.get("logits")
+        labels = result.get("labels")
+        token_losses = result.get("token_losses")
+        if not isinstance(logits, Tensor) or not isinstance(labels, Tensor):
+            raise TypeError(
+                "GT-NTC monitoring requires generator results containing "
+                "Tensor logits and labels"
+            )
+        labels = labels.to(device=logits.device)
+        if row_mask is not None:
+            mask = torch.as_tensor(
+                row_mask,
+                device=logits.device,
+                dtype=torch.bool,
+            )
+            if mask.shape != (logits.shape[0],):
+                raise ValueError(
+                    "GT-NTC row_mask must have shape [batch], got "
+                    f"{tuple(mask.shape)} for batch {logits.shape[0]}"
+                )
+            logits = logits[mask]
+            labels = labels[mask]
+            if isinstance(token_losses, Tensor):
+                token_losses = token_losses[mask]
+        metric = self.gt_ntc_metrics[scenario]
+        if isinstance(token_losses, Tensor):
+            metric.update_from_token_losses(
+                token_losses.detach(),
+                labels.detach(),
+            )
+        else:
+            metric.update(logits.detach(), labels.detach())
+
+    def _log_gt_ntc_metrics(self, *, batch_size: int) -> None:
+        """Register updated GT-NTC metrics for Lightning epoch-only logging."""
+
+        if getattr(self, "_trainer", None) is None:
+            return
+        for scenario, log_path in self.GT_NTC_LOG_PATHS.items():
+            metric = self.gt_ntc_metrics[scenario]
+            if metric.update_count == 0:
+                continue
+            self.log(
+                log_path,
+                metric,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=False,
+                batch_size=batch_size,
+                metric_attribute=f"gt_ntc_metrics.{scenario}",
+            )
 
     def _generation_uses_cfg(self, batch: Mapping[str, Any]) -> bool:
         generation_kwargs = batch.get("generation_kwargs")
@@ -297,9 +529,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         values = targets.detach().cpu().tolist()
         for source, source_target in enumerate(values):
             candidates = [
-                index
-                for index, target in enumerate(values)
-                if target != source_target
+                index for index, target in enumerate(values) if target != source_target
             ]
             if not candidates:
                 continue
@@ -319,7 +549,9 @@ class UnlearnableGenerationModel(BaseGenerationModel):
     ) -> Tensor:
         return torch.relu(positive_losses - default_losses.detach() + margin).mean()
 
-    def _wrong_artist_targets(self, targets: Tensor, batch_idx: int) -> Optional[Tensor]:
+    def _wrong_artist_targets(
+        self, targets: Tensor, batch_idx: int
+    ) -> Optional[Tensor]:
         """Choose deterministic, always-different artist negatives.
 
         Negatives need not occur elsewhere in the mini-batch. Cycling the
@@ -346,9 +578,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         wrong condition noisy or increases its language-model loss.
         """
 
-        return torch.relu(
-            correct_losses - wrong_losses.detach() + float(margin)
-        ).mean()
+        return torch.relu(correct_losses - wrong_losses.detach() + float(margin)).mean()
 
     def _scale_monitors(self) -> Dict[str, Tensor]:
         effective = self.concept_learner.effective_block_scales
@@ -372,7 +602,9 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         monitors: Dict[str, Tensor] = {
             f"{prefix}_intervention_energy_monitor": energy,
             f"{prefix}_intervention_relative_rms_monitor": energy.clamp_min(0).sqrt(),
-            f"{prefix}_intervention_relative_rms_max_monitor": maximum.clamp_min(0).sqrt(),
+            f"{prefix}_intervention_relative_rms_max_monitor": maximum.clamp_min(
+                0
+            ).sqrt(),
         }
         by_block = result.get("intervention_energy_by_block", {})
         if isinstance(by_block, Mapping):
@@ -398,9 +630,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         )
         if budget is None or float(budget) == 0.0:
             return energy
-        epsilon = float(
-            _cfg_get(self.loss_cfg, "intervention_energy_epsilon", 1e-6)
-        )
+        epsilon = float(_cfg_get(self.loss_cfg, "intervention_energy_epsilon", 1e-6))
         global_relative_rms = energy.clamp_min(epsilon).sqrt()
         return F.relu(global_relative_rms - float(budget)).square()
 
@@ -413,9 +643,9 @@ class UnlearnableGenerationModel(BaseGenerationModel):
     ) -> Tensor:
         """Match negative degradation to the finite positive improvement."""
 
-        positive_gain = (
-            default_losses.detach() - positive_losses.detach()
-        ).clamp_min(0.0)
+        positive_gain = (default_losses.detach() - positive_losses.detach()).clamp_min(
+            0.0
+        )
         if max_gain is not None:
             positive_gain = positive_gain.clamp_max(float(max_gain))
         negative_effect = negative_losses - default_losses.detach()
@@ -427,9 +657,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         reference_losses: Tensor,
         margin: float,
     ) -> Tensor:
-        return torch.relu(
-            controlled_losses - reference_losses.detach() - margin
-        ).mean()
+        return torch.relu(controlled_losses - reference_losses.detach() - margin).mean()
 
     def _cross_artist_preservation(
         self,
@@ -516,9 +744,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         positive_loss = positive_losses.mean()
         negative_loss = negative_losses.mean()
 
-        positive_margin = float(
-            _cfg_get(self.objective_cfg, "positive_margin", 0.0)
-        )
+        positive_margin = float(_cfg_get(self.objective_cfg, "positive_margin", 0.0))
         positive_margin_loss = self._positive_margin_loss(
             positive_losses,
             default_losses,
@@ -540,9 +766,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             {},
         )
         wrong_targets = self._wrong_artist_targets(targets, batch_idx)
-        contrastive_pair_rate = default_loss.new_tensor(
-            wrong_targets is not None
-        )
+        contrastive_pair_rate = default_loss.new_tensor(wrong_targets is not None)
         wrong_positive_loss = default_loss.new_zeros(())
         artist_contrastive_loss = default_loss.new_zeros(())
         if (
@@ -554,9 +778,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     batch,
                     batch_idx,
                     stage=stage,
-                    condition=self.concept_learner.positive_condition(
-                        wrong_targets
-                    ),
+                    condition=self.concept_learner.positive_condition(wrong_targets),
                 )
             wrong_losses = wrong_result["sample_losses"]
             wrong_positive_loss = wrong_losses.mean()
@@ -587,12 +809,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 _cfg_get(self.loss_cfg, "concept_center_weight", 0.0)
             ),
         )
-        default_weight = float(
-            _cfg_get(self.objective_cfg, "default_weight", 0.0)
-        )
-        positive_weight = float(
-            _cfg_get(self.objective_cfg, "positive_weight", 0.0)
-        )
+        default_weight = float(_cfg_get(self.objective_cfg, "default_weight", 0.0))
+        positive_weight = float(_cfg_get(self.objective_cfg, "positive_weight", 0.0))
         positive_margin_weight = float(
             _cfg_get(self.objective_cfg, "positive_margin_weight", 0.0)
         )
@@ -600,12 +818,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             _cfg_get(self.objective_cfg, "suppression_symmetry_weight", 1.0)
         )
         preservation_cfg = _cfg_get(self.objective_cfg, "preservation", {})
-        preservation_weight = float(
-            _cfg_get(preservation_cfg, "weight", 1.0)
-        )
-        contrastive_weight = float(
-            _cfg_get(contrastive_cfg, "weight", 0.0)
-        )
+        preservation_weight = float(_cfg_get(preservation_cfg, "weight", 1.0))
+        contrastive_weight = float(_cfg_get(contrastive_cfg, "weight", 0.0))
         energy_weight = float(
             _cfg_get(self.loss_cfg, "intervention_energy_weight", 0.0)
         )
@@ -615,12 +829,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             + cross_energy
         )
         intervention_budget_excess = (
-            self._intervention_budget_excess(
-                positive_result["intervention_energy"]
-            )
-            + self._intervention_budget_excess(
-                negative_result["intervention_energy"]
-            )
+            self._intervention_budget_excess(positive_result["intervention_energy"])
+            + self._intervention_budget_excess(negative_result["intervention_energy"])
             + self._intervention_budget_excess(cross_energy)
         )
 
@@ -657,12 +867,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             "concept_auxiliary": regularizers["loss"],
         }
         loss_dict.update(self._scale_monitors())
-        loss_dict.update(
-            self._energy_monitors(positive_result, prefix="positive")
-        )
-        loss_dict.update(
-            self._energy_monitors(negative_result, prefix="negative")
-        )
+        loss_dict.update(self._energy_monitors(positive_result, prefix="positive"))
+        loss_dict.update(self._energy_monitors(negative_result, prefix="negative"))
         loss_dict.update(
             {
                 (name if name.startswith("concept_") else f"concept_{name}"): value
@@ -687,9 +893,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
 
         targets = self._artist_targets(batch)
         batch_size = targets.shape[0]
-        default_weight = float(
-            _cfg_get(self.objective_cfg, "default_weight", 0.0)
-        )
+        default_weight = float(_cfg_get(self.objective_cfg, "default_weight", 0.0))
         default_context = (
             nullcontext()
             if self.train_generator and default_weight > 0
@@ -702,6 +906,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 stage="train",
                 condition=None,
             )
+        self._update_gt_ntc("no_control", default_result)
         default_losses = default_result["sample_losses"]
         default_loss = default_losses.mean()
 
@@ -722,8 +927,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             )
         )
         if not cycle or any(
-            value not in {"positive", "symmetry", "preservation"}
-            for value in cycle
+            value not in {"positive", "symmetry", "preservation"} for value in cycle
         ):
             raise ValueError(
                 "control_training.branch_cycle may contain only positive, "
@@ -738,9 +942,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             "default_lm_reference_monitor": default_loss,
             "branch_positive": default_loss.new_tensor(branch == "positive"),
             "branch_symmetry": default_loss.new_tensor(branch == "symmetry"),
-            "branch_preservation": default_loss.new_tensor(
-                branch == "preservation"
-            ),
+            "branch_preservation": default_loss.new_tensor(branch == "preservation"),
             "concept_auxiliary": regularizers["loss"],
         }
         loss_dict.update(self._scale_monitors())
@@ -752,11 +954,10 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 stage="train",
                 condition=self.concept_learner.positive_condition(targets),
             )
+            self._update_gt_ntc("enhance_target", positive_result)
             positive_losses = positive_result["sample_losses"]
             positive_loss = positive_losses.mean()
-            margin = float(
-                _cfg_get(self.objective_cfg, "positive_margin", 0.0)
-            )
+            margin = float(_cfg_get(self.objective_cfg, "positive_margin", 0.0))
             margin_loss = self._positive_margin_loss(
                 positive_losses,
                 default_losses,
@@ -768,9 +969,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 {},
             )
             wrong_targets = self._wrong_artist_targets(targets, batch_idx)
-            contrastive_pair_rate = default_loss.new_tensor(
-                wrong_targets is not None
-            )
+            contrastive_pair_rate = default_loss.new_tensor(wrong_targets is not None)
             wrong_positive_loss = default_loss.new_zeros(())
             artist_contrastive_loss = default_loss.new_zeros(())
             if (
@@ -827,9 +1026,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     "intervention_budget_excess": intervention_budget_excess,
                 }
             )
-            loss_dict.update(
-                self._energy_monitors(positive_result, prefix="positive")
-            )
+            loss_dict.update(self._energy_monitors(positive_result, prefix="positive"))
         elif branch == "symmetry":
             with torch.no_grad():
                 positive_result = self._run_generator(
@@ -838,11 +1035,28 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     stage="train",
                     condition=self.concept_learner.positive_condition(targets),
                 )
+            self._update_gt_ntc("enhance_target", positive_result)
+            (
+                negative_condition,
+                multi_suppression_row_rate,
+                suppression_cardinality,
+            ) = self._scheduled_suppression_condition(targets, batch_idx)
             negative_result = self._run_generator(
                 batch,
                 batch_idx,
                 stage="train",
-                condition=self.concept_learner.suppression_condition(targets),
+                condition=negative_condition,
+            )
+            suppression_cardinalities = negative_condition.weights.gt(0).sum(dim=-1)
+            self._update_gt_ntc(
+                "suppress_single_target",
+                negative_result,
+                row_mask=suppression_cardinalities.eq(1),
+            )
+            self._update_gt_ntc(
+                "suppress_multiple_target",
+                negative_result,
+                row_mask=suppression_cardinalities.gt(1),
             )
             positive_loss = positive_result["sample_losses"].mean()
             negative_losses = negative_result["sample_losses"]
@@ -880,14 +1094,14 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     "suppression_effect_monitor": (
                         negative_loss.detach() - default_loss.detach()
                     ),
+                    "multi_suppression_row_rate_monitor": (multi_suppression_row_rate),
+                    "multi_suppression_cardinality_monitor": (suppression_cardinality),
                     "suppression_symmetry": symmetry_loss,
                     "intervention_energy_monitor": intervention_energy,
                     "intervention_budget_excess": intervention_budget_excess,
                 }
             )
-            loss_dict.update(
-                self._energy_monitors(negative_result, prefix="negative")
-            )
+            loss_dict.update(self._energy_monitors(negative_result, prefix="negative"))
         else:
             (
                 cross_raw,
@@ -912,6 +1126,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     stage="train",
                     condition=self.concept_learner.positive_condition(targets),
                 )
+                self._update_gt_ntc("enhance_target", positive_result)
                 positive_losses = positive_result["sample_losses"]
                 positive_loss = positive_losses.mean()
                 margin_loss = self._positive_margin_loss(
@@ -966,8 +1181,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     total_loss
                     + float(_cfg_get(preservation_cfg, "weight", 1.0))
                     * preservation_loss
-                    + energy_weight
-                    * self._intervention_budget_excess(cross_energy)
+                    + energy_weight * self._intervention_budget_excess(cross_energy)
                 )
                 loss_dict.update(
                     {
@@ -990,6 +1204,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 if name != "loss"
             }
         )
+        self._log_gt_ntc_metrics(batch_size=batch_size)
         self._log_losses(
             total_loss,
             loss_dict,
@@ -1020,8 +1235,14 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             return self.concept_learner.suppression_condition(suppressed)
         direction = batch.get("control_direction", default_direction)
         direction_tensor = torch.as_tensor(direction)
-        if direction_tensor.numel() == 1 and float(direction_tensor) == 0.0:
+        if direction_tensor.numel() == 0 or direction_tensor.eq(0).all().item():
             return None
+        concept_weights = batch.get("concept_weights")
+        if concept_weights is not None:
+            return self.concept_learner.prepare_condition(
+                concept_weights=concept_weights,
+                direction=direction,
+            )
         targets = self._artist_targets(batch)
         return self.concept_learner.prepare_condition(
             concept_ids=targets,
@@ -1061,11 +1282,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
     ) -> Dict[str, Tensor]:
         del dataloader_idx
         device = next(
-            (
-                value.device
-                for value in batch.values()
-                if isinstance(value, Tensor)
-            ),
+            (value.device for value in batch.values() if isinstance(value, Tensor)),
             self.device,
         )
         precision_context = nullcontext()
@@ -1152,9 +1369,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             other_tokens = counterfactual_batch.get("audio_tokens")
             if not isinstance(other_tokens, Tensor):
                 raise ValueError("counterfactual comparison requires audio_tokens")
-            other_ground_truth, other_ground_truth_lengths = self.model.decode_audio_tokens(
-                other_tokens,
-                counterfactual_batch.get("decoder_attention_mask"),
+            other_ground_truth, other_ground_truth_lengths = (
+                self.model.decode_audio_tokens(
+                    other_tokens,
+                    counterfactual_batch.get("decoder_attention_mask"),
+                )
             )
 
         kwargs = dict(generation_kwargs or {})
@@ -1162,7 +1381,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         cuda_devices = []
         if device.type == "cuda":
             cuda_devices = [
-                device.index if device.index is not None else torch.cuda.current_device()
+                (
+                    device.index
+                    if device.index is not None
+                    else torch.cuda.current_device()
+                )
             ]
         with torch.random.fork_rng(devices=cuda_devices):
             torch.manual_seed(generation_seed)

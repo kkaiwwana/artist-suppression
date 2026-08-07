@@ -626,7 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=str(repo_root / "checkpoints" / "musicgen-small"),
+        default=str(repo_root / "models" / "musicgen-small"),
         help="Standalone EnCodec or MusicGen checkpoint",
     )
     parser.add_argument("--revision", default="main")

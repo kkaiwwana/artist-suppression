@@ -32,6 +32,7 @@ import torch
 import wandb
 
 from src.callback.audio_comparison import ValidationAudioComparisonCallback
+from src.callback.epoch_control_evaluation import EpochControlEvaluationCallback
 from src.callback.git_diff import GitDiffCallback
 from src.runner import setup_dataset, setup_model
 
@@ -165,9 +166,20 @@ def _build_callbacks(config: DictConfig) -> list[pl.Callback]:
     if not isinstance(comparison_cfg, dict):
         raise TypeError("runner.validation_audio must resolve to a mapping")
     comparison_enabled = bool(comparison_cfg.pop("enabled", True))
+    epoch_evaluation_value = config.runner.get("epoch_control_evaluation", {})
+    epoch_evaluation_cfg = (
+        OmegaConf.to_container(epoch_evaluation_value, resolve=True)
+        if OmegaConf.is_config(epoch_evaluation_value)
+        else dict(epoch_evaluation_value)
+    )
+    if not isinstance(epoch_evaluation_cfg, dict):
+        raise TypeError("runner.epoch_control_evaluation must resolve to a mapping")
+    epoch_evaluation_enabled = bool(epoch_evaluation_cfg.pop("enabled", False))
     callbacks.append(LearningRateMonitor(logging_interval="step"))
     if comparison_enabled:
         callbacks.append(ValidationAudioComparisonCallback(**comparison_cfg))
+    if epoch_evaluation_enabled:
+        callbacks.append(EpochControlEvaluationCallback(**epoch_evaluation_cfg))
     return callbacks
 
 

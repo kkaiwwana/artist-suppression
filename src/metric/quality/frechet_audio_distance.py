@@ -101,7 +101,9 @@ class FrechetAudioDistance(Metric):
         with torch.no_grad():
             if self.embedding_encoder is not None:
                 try:
-                    output = self.embedding_encoder(audio, sample_rate=sample_rate, **self.model_kwargs)
+                    output = self.embedding_encoder(
+                        audio, sample_rate=sample_rate, **self.model_kwargs
+                    )
                 except TypeError:
                     output = self.embedding_encoder(audio, **self.model_kwargs)
             else:
@@ -110,18 +112,37 @@ class FrechetAudioDistance(Metric):
                     model.eval()
                 if hasattr(model, "encode_audio"):
                     try:
-                        output = model.encode_audio(audio, sample_rate=sample_rate, **self.model_kwargs)
+                        output = model.encode_audio(
+                            audio, sample_rate=sample_rate, **self.model_kwargs
+                        )
                     except TypeError:
                         output = model.encode_audio(audio, **self.model_kwargs)
                 elif hasattr(model, "get_audio_features"):
                     output = model.get_audio_features(audio, **self.model_kwargs)
                 else:
                     try:
-                        output = model(audio, sample_rate=sample_rate, **self.model_kwargs)
+                        output = model(
+                            audio, sample_rate=sample_rate, **self.model_kwargs
+                        )
                     except TypeError:
                         output = model(audio, **self.model_kwargs)
 
-        embeddings = extract_tensor_output(output, preferred_key=self.embedding_key)
+        # Canonical VGGish wrappers may preserve clip boundaries by returning a
+        # list of [windows, D] matrices. FAD treats every window as an
+        # observation, so concatenate those matrices instead of letting the
+        # generic output extractor select only the first list element.
+        if isinstance(output, list) and output:
+            grouped = [torch.as_tensor(value) for value in output]
+            if all(value.ndim == 2 for value in grouped):
+                embeddings = torch.cat(grouped, dim=0)
+            elif all(value.ndim == 1 for value in grouped):
+                embeddings = torch.stack(grouped, dim=0)
+            else:
+                embeddings = extract_tensor_output(
+                    output, preferred_key=self.embedding_key
+                )
+        else:
+            embeddings = extract_tensor_output(output, preferred_key=self.embedding_key)
         if embeddings.ndim == 1:
             embeddings = embeddings.unsqueeze(0)
         if embeddings.ndim > 2:
@@ -134,20 +155,89 @@ class FrechetAudioDistance(Metric):
         reference_audio: Tensor | None = None,
         *,
         sample_rate: int | None = None,
+        generated_embeddings: Tensor | None = None,
+        reference_embeddings: Tensor | None = None,
     ) -> None:
+        if generated_audio is not None and generated_embeddings is not None:
+            raise ValueError("Pass generated_audio or generated_embeddings, not both.")
+        if reference_audio is not None and reference_embeddings is not None:
+            raise ValueError("Pass reference_audio or reference_embeddings, not both.")
         sr = sample_rate if sample_rate is not None else self.sample_rate
         if generated_audio is not None:
             self.update_generated(generated_audio, sample_rate=sr)
         if reference_audio is not None:
             self.update_reference(reference_audio, sample_rate=sr)
+        if generated_embeddings is not None:
+            self.update_generated_embeddings(generated_embeddings)
+        if reference_embeddings is not None:
+            self.update_reference_embeddings(reference_embeddings)
 
-    def update_generated(self, audio: Tensor, *, sample_rate: int | None = None) -> None:
-        embeddings = self._embed(audio, sample_rate if sample_rate is not None else self.sample_rate)
+    @staticmethod
+    def _validate_precomputed_embeddings(embeddings: Tensor, name: str) -> Tensor:
+        values = torch.as_tensor(embeddings)
+        if values.ndim == 1:
+            values = values.unsqueeze(0)
+        if values.ndim != 2:
+            raise ValueError(
+                f"{name} must have shape [samples, embedding_dim]; "
+                f"got {tuple(values.shape)}."
+            )
+        if values.shape[0] == 0 or values.shape[1] == 0:
+            raise ValueError(f"{name} must be non-empty.")
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError(f"{name} contains non-finite values.")
+        return values.detach().float()
+
+    def update_generated(
+        self, audio: Tensor, *, sample_rate: int | None = None
+    ) -> None:
+        embeddings = self._embed(
+            audio, sample_rate if sample_rate is not None else self.sample_rate
+        )
         self.generated_embeddings.append(embeddings.detach())
 
-    def update_reference(self, audio: Tensor, *, sample_rate: int | None = None) -> None:
-        embeddings = self._embed(audio, sample_rate if sample_rate is not None else self.sample_rate)
+    def update_reference(
+        self, audio: Tensor, *, sample_rate: int | None = None
+    ) -> None:
+        embeddings = self._embed(
+            audio, sample_rate if sample_rate is not None else self.sample_rate
+        )
         self.reference_embeddings.append(embeddings.detach())
+
+    def update_generated_embeddings(self, embeddings: Tensor) -> None:
+        """Accumulate already-computed generated embeddings.
+
+        This is useful for canonical VGGish FAD, where every ~0.96-second
+        window is an observation and callers may cache/group the windows before
+        feeding them to the metric.
+        """
+
+        self.generated_embeddings.append(
+            self._validate_precomputed_embeddings(
+                embeddings, "generated_embeddings"
+            ).to(self.device)
+        )
+
+    def update_reference_embeddings(self, embeddings: Tensor) -> None:
+        """Accumulate already-computed reference embeddings."""
+
+        self.reference_embeddings.append(
+            self._validate_precomputed_embeddings(
+                embeddings, "reference_embeddings"
+            ).to(self.device)
+        )
+
+    def update_embeddings(
+        self,
+        generated_embeddings: Tensor | None = None,
+        reference_embeddings: Tensor | None = None,
+    ) -> None:
+        """Accumulate either side from precomputed embedding matrices."""
+
+        if generated_embeddings is not None:
+            self.update_generated_embeddings(generated_embeddings)
+        if reference_embeddings is not None:
+            self.update_reference_embeddings(reference_embeddings)
 
     @staticmethod
     def _cat_state(state: list[Tensor] | Tensor) -> Tensor | None:
@@ -171,9 +261,13 @@ class FrechetAudioDistance(Metric):
 
     @staticmethod
     def _matrix_sqrt_psd(matrix: Tensor, eps: float) -> Tensor:
+        del eps
         matrix = (matrix + matrix.T) / 2.0
         eigvals, eigvecs = torch.linalg.eigh(matrix)
-        eigvals = eigvals.clamp_min(eps).sqrt()
+        # Rank-deficient covariances are expected when N < embedding_dim
+        # (common for per-artist VGGish FAD). Zero eigenvalues must remain
+        # zero; lifting them to eps biases the covariance trace term.
+        eigvals = eigvals.clamp_min(0.0).sqrt()
         return (eigvecs * eigvals.unsqueeze(0)) @ eigvecs.T
 
     def compute(self) -> Tensor:
@@ -187,8 +281,11 @@ class FrechetAudioDistance(Metric):
                 f"got {generated.shape[1]} and {reference.shape[1]}."
             )
 
-        generated = generated.float()
-        reference = reference.to(generated.device).float()
+        # Estimate 128-D covariance products in float64; float32 eigendecomposition
+        # can otherwise make FAD noticeably unstable for small per-artist cohorts.
+        output_dtype = generated.dtype
+        generated = generated.double()
+        reference = reference.to(generated.device).double()
         mu_generated = generated.mean(dim=0)
         mu_reference = reference.mean(dim=0)
         cov_generated = self._covariance(generated)
@@ -201,4 +298,4 @@ class FrechetAudioDistance(Metric):
             self.eps,
         )
         trace_term = torch.trace(cov_generated + cov_reference - 2.0 * cov_mean)
-        return (mean_term + trace_term).clamp_min(0.0)
+        return (mean_term + trace_term).clamp_min(0.0).to(dtype=output_dtype)
