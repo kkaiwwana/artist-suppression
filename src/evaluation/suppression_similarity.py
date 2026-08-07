@@ -331,7 +331,34 @@ class HFCLAPEncoder:
         import torchaudio
 
         return torchaudio.functional.resample(audio, int(sample_rate), self.sample_rate)
+        
+    @staticmethod
+    def _feature_tensor(output: Any) -> Tensor:
+        """Extract projected features across Transformers CLAP API versions.
 
+        Transformers 4.x returned a tensor from ``get_audio_features`` and
+        ``get_text_features``.  Transformers 5.x returns a
+        ``BaseModelOutputWithPooling`` whose normalized projected embedding is
+        stored in ``pooler_output``.  Supporting both keeps evaluation
+        notebooks independent of the locally installed Transformers version.
+        """
+
+        if isinstance(output, Tensor):
+            return output
+        for name in ("pooler_output", "audio_embeds", "text_embeds"):
+            value = getattr(output, name, None)
+            if isinstance(value, Tensor):
+                return value
+            if isinstance(output, Mapping):
+                value = output.get(name)
+                if isinstance(value, Tensor):
+                    return value
+        if isinstance(output, (tuple, list)) and output and isinstance(output[0], Tensor):
+            return output[0]
+        raise TypeError(
+            "CLAP feature method returned no tensor or recognized embedding field"
+        )
+        
     @torch.inference_mode()
     def encode_audio(self, audio: Tensor, *, sample_rate: int, batch_size: int = 8) -> Tensor:
         waveforms = self._resample(audio, sample_rate)
@@ -339,13 +366,14 @@ class HFCLAPEncoder:
         for start in range(0, waveforms.shape[0], batch_size):
             values = [row.numpy() for row in waveforms[start : start + batch_size]]
             inputs = self.processor(
-                audios=values,
+                audio=values,
                 sampling_rate=self.sample_rate,
                 return_tensors="pt",
                 padding=True,
             )
             inputs = {key: value.to(self.device) for key, value in inputs.items()}
-            outputs.append(self.model.get_audio_features(**inputs).float().cpu())
+            features = self._feature_tensor(self.model.get_audio_features(**inputs))
+            outputs.append(features.float().cpu())
         return torch.cat(outputs, dim=0)
 
     @torch.inference_mode()
@@ -360,7 +388,8 @@ class HFCLAPEncoder:
                 truncation=True,
             )
             inputs = {key: value.to(self.device) for key, value in inputs.items()}
-            outputs.append(self.model.get_text_features(**inputs).float().cpu())
+            features = self._feature_tensor(self.model.get_text_features(**inputs))
+            outputs.append(features.float().cpu())
         return torch.cat(outputs, dim=0)
 
     def score(self, audio: Tensor, texts: Sequence[str], *, sample_rate: int) -> Tensor:

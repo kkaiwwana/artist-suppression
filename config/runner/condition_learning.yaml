@@ -24,7 +24,7 @@ optimizer:
   name: AdamW
   optimizer_params:
     # Only the randomly initialized explicit controller trains by default.
-    lr: 0.0001
+    lr: 0.00008
     weight_decay: 0
 
 
@@ -35,7 +35,7 @@ scheduler: null
 checkpoint:
   monitor: val/loss_total
   mode: min
-  save_top_k: 3
+  save_top_k: 6
   save_last: true
 
 validation_audio:
@@ -52,8 +52,8 @@ validation_audio:
     # Match the sampling filter used by the released MusicGen recipe. Without
     # an explicit value, recent Transformers versions may sample from all 2048
     # EnCodec entries because the legacy checkpoint stores top_k as null.
-    top_k: 250
-    temperature: 1.0
+    # top_k: 250
+    # temperature: 1.0
     max_new_tokens: 250
 
 
