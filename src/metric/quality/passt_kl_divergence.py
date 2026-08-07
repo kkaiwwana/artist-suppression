@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import io
 from threading import RLock
 from typing import Any, Iterator
 
@@ -60,7 +61,10 @@ def _load_default_passt_classifier() -> nn.Module:
             "PaSSTKLDivergence needs the optional PaSST dependency. Install "
             "`hear21passt` and `timm`, or inject classifier/classifier_loader."
         ) from exc
-    return get_basic_model(mode="logits")
+    # hear21passt prints the full network repr while constructing the public
+    # model. That is useful interactively but overwhelms epoch-evaluation logs.
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        return get_basic_model(mode="logits")
 
 
 def _extract_logits(output: Any) -> Tensor:

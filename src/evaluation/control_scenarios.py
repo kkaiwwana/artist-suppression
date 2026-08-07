@@ -51,6 +51,13 @@ METRIC_LABELS = {
     "fad": "FAD",
 }
 
+# GT token probabilities can differ between controls well below 1e-4. Keeping
+# more digits for that cell prevents a genuinely different teacher-forced
+# result from looking identical after table formatting.
+METRIC_PRECISIONS = {
+    "gt_token_confidence": 8,
+}
+
 
 @dataclass(frozen=True)
 class ScenarioCondition:
@@ -408,7 +415,7 @@ def summarize_scenario_metrics(
 def formatted_table_rows(
     summaries: Mapping[str, Mapping[str, MeanStd]],
     *,
-    precision: int = 4,
+    precision: int | None = None,
 ) -> list[list[str]]:
     """Create W&B-ready rows: six scenarios by eight ``mean ± std`` cells."""
 
@@ -416,7 +423,14 @@ def formatted_table_rows(
         [
             SCENARIO_LABELS[scenario],
             *(
-                format_mean_std(summaries[scenario][metric], precision=precision)
+                format_mean_std(
+                    summaries[scenario][metric],
+                    precision=(
+                        int(precision)
+                        if precision is not None
+                        else METRIC_PRECISIONS.get(metric, 4)
+                    ),
+                )
                 for metric in EVALUATION_METRICS
             ),
         ]
@@ -428,6 +442,7 @@ __all__ = [
     "CohortItem",
     "EVALUATION_METRICS",
     "METRIC_LABELS",
+    "METRIC_PRECISIONS",
     "MeanStd",
     "SCENARIO_LABELS",
     "SCENARIO_NAMES",

@@ -16,6 +16,7 @@ from torch import Tensor
 from src.evaluation.control_scenarios import (
     EVALUATION_METRICS,
     METRIC_LABELS,
+    SCENARIO_LABELS,
     SCENARIO_NAMES,
     CohortItem,
     ScenarioCondition,
@@ -191,12 +192,16 @@ def _vggish_embeddings(runtime: Any, audio: Tensor, *, sample_rate: int) -> Tens
 
 
 def _release_runtime(runtime: Any) -> None:
-    model = getattr(runtime, "model", None)
-    if model is not None and callable(getattr(model, "to", None)):
-        model.to("cpu")
-    elif callable(getattr(runtime, "to", None)):
+    """Offload a cached runtime to CPU between heavyweight metric passes."""
+
+    if callable(getattr(runtime, "to", None)):
         runtime.to("cpu")
-    del runtime
+    else:
+        model = getattr(runtime, "model", None)
+        if model is not None and callable(getattr(model, "to", None)):
+            model.to("cpu")
+        if hasattr(runtime, "device"):
+            runtime.device = torch.device("cpu")
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -229,6 +234,9 @@ class EpochControlArtifacts:
     reference_audio: Tensor
     generated_audio: Mapping[str, Tensor]
     gt_token_confidence: Mapping[str, Tensor]
+    teacher_forced_intervention_energy: Mapping[str, Tensor] | None = None
+    prompt_audio: Tensor | None = None
+    artist_index_to_key: Mapping[int, str] | None = None
 
 
 class EpochControlEvaluationCallback(pl.Callback):
@@ -260,8 +268,14 @@ class EpochControlEvaluationCallback(pl.Callback):
         clap_model_name_or_path: str = "laion/clap-htsat-unfused",
         local_files_only: bool = False,
         metric_device: str | torch.device | None = None,
-        log_key: str = "evaluation/control_metrics",
-        numeric_namespace: str = "evaluation/control_metric_stats",
+        log_key: str = "Control Evaluation/Results",
+        numeric_namespace: str = "Control Evaluation Details",
+        cache_external_models: bool = True,
+        hide_detailed_metrics: bool = True,
+        qualitative_enabled: bool = True,
+        qualitative_log_key: str = "Qualitative Comparison/Matched Six Scenarios",
+        qualitative_sample_index: int = 0,
+        qualitative_include_prompt: bool = True,
         fail_on_error: bool = False,
         generation_kwargs: Mapping[str, Any] | None = None,
         runtime_factories: Mapping[str, Callable[[], Any]] | None = None,
@@ -284,6 +298,8 @@ class EpochControlEvaluationCallback(pl.Callback):
             raise ValueError("audio prompt and continuation durations must be positive")
         if multi_min_artists < 2 or multi_max_artists < multi_min_artists:
             raise ValueError("multi bounds must satisfy 2 <= min <= max")
+        if int(qualitative_sample_index) < 0:
+            raise ValueError("qualitative_sample_index must be non-negative")
 
         self.every_n_epochs = int(every_n_epochs)
         self.num_artists = int(num_artists)
@@ -317,6 +333,12 @@ class EpochControlEvaluationCallback(pl.Callback):
         )
         self.log_key = str(log_key)
         self.numeric_namespace = str(numeric_namespace).rstrip("/")
+        self.cache_external_models = bool(cache_external_models)
+        self.hide_detailed_metrics = bool(hide_detailed_metrics)
+        self.qualitative_enabled = bool(qualitative_enabled)
+        self.qualitative_log_key = str(qualitative_log_key)
+        self.qualitative_sample_index = int(qualitative_sample_index)
+        self.qualitative_include_prompt = bool(qualitative_include_prompt)
         self.fail_on_error = bool(fail_on_error)
         self.generation_kwargs = dict(generation_kwargs or {})
         self.runtime_factories = dict(runtime_factories or {})
@@ -326,6 +348,10 @@ class EpochControlEvaluationCallback(pl.Callback):
         self._scenario_plan: tuple[ScenarioCondition, ...] | None = None
         self._pending_epoch: int | None = None
         self._logged_epoch: int | None = None
+        self._runtime_cache: dict[str, Any] = {}
+        self._classifier_artist_keys: set[str] | None = None
+        self._classifier_vocabulary_resolved = False
+        self._wandb_metrics_defined = False
 
     @staticmethod
     def _wandb_experiment(trainer: pl.Trainer) -> Any | None:
@@ -386,7 +412,10 @@ class EpochControlEvaluationCallback(pl.Callback):
         self._flush_pending(trainer, pl_module)
 
     def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        self._flush_pending(trainer, pl_module)
+        try:
+            self._flush_pending(trainer, pl_module)
+        finally:
+            self._clear_runtime_cache()
 
     @staticmethod
     def _barrier(trainer: pl.Trainer, name: str) -> None:
@@ -511,9 +540,13 @@ class EpochControlEvaluationCallback(pl.Callback):
     def _classifier_vocabulary_filter(self) -> set[str] | None:
         """Read checkpoint metadata before sampling classifiable artists."""
 
+        if self._classifier_vocabulary_resolved:
+            return self._classifier_artist_keys
         if self.evaluation_runner is not None or "classifier" in self.runtime_factories:
+            self._classifier_vocabulary_resolved = True
             return None
         if not self.classifier_checkpoint_path:
+            self._classifier_vocabulary_resolved = True
             return None
         from src.evaluation.checkpoint_runtime import trusted_torch_load
 
@@ -528,7 +561,9 @@ class EpochControlEvaluationCallback(pl.Callback):
         artist_keys = {str(value) for value in vocabulary}
         if not artist_keys:
             raise ValueError("artist classifier checkpoint has an empty vocabulary")
-        return artist_keys
+        self._classifier_artist_keys = artist_keys
+        self._classifier_vocabulary_resolved = True
+        return self._classifier_artist_keys
 
     @staticmethod
     def _slice_scenario(
@@ -557,6 +592,65 @@ class EpochControlEvaluationCallback(pl.Callback):
         if not callable(prepare):
             raise RuntimeError("model must expose concept_learner.prepare_condition()")
         return prepare(concept_weights=scenario.weights, direction=scenario.direction)
+
+    @staticmethod
+    def _gt_ntc_max_abs_deltas(confidences: Mapping[str, Tensor]) -> dict[str, float]:
+        """Compare every controlled teacher-forced result with No Control."""
+
+        baseline = torch.as_tensor(confidences["no_control"]).double().flatten()
+        deltas: dict[str, float] = {}
+        for name in SCENARIO_NAMES:
+            current = torch.as_tensor(confidences[name]).double().flatten()
+            if current.shape != baseline.shape:
+                raise ValueError(
+                    "all GT-NTC scenario vectors must have matching shapes"
+                )
+            finite = torch.isfinite(current) & torch.isfinite(baseline)
+            deltas[name] = (
+                float((current[finite] - baseline[finite]).abs().max().item())
+                if bool(finite.any())
+                else float("nan")
+            )
+        return deltas
+
+    @classmethod
+    def _diagnose_gt_ntc(
+        cls,
+        confidences: Mapping[str, Tensor],
+        intervention_energies: Mapping[str, Sequence[float]],
+    ) -> None:
+        """Warn when all controlled results are truly identical, not rounded."""
+
+        deltas = cls._gt_ntc_max_abs_deltas(confidences)
+        controlled_deltas = [
+            value for name, value in deltas.items() if name != "no_control"
+        ]
+        if not controlled_deltas or not all(
+            value == 0.0 for value in controlled_deltas
+        ):
+            return
+        observed_energies = [
+            abs(float(value))
+            for name, values in intervention_energies.items()
+            if name != "no_control"
+            for value in values
+            if math.isfinite(float(value))
+        ]
+        max_energy = max(observed_energies, default=0.0)
+        if max_energy == 0.0:
+            log.warning(
+                "GT-NTC is exactly identical for all six scenarios and the "
+                "controlled teacher-forcing intervention energy is zero. This "
+                "usually means the learned control residual is still zero (or "
+                "intervention_scale is zero), rather than a statistics mix-up."
+            )
+        else:
+            log.warning(
+                "GT-NTC is exactly identical for all six scenarios even though "
+                "controlled teacher-forcing intervention energy is non-zero "
+                "(max=%g). Inspect concept hooks and logits for this checkpoint.",
+                max_energy,
+            )
 
     def _collect_artifacts(
         self,
@@ -591,6 +685,10 @@ class EpochControlEvaluationCallback(pl.Callback):
 
         generated: dict[str, list[Tensor]] = {name: [] for name in SCENARIO_NAMES}
         confidences: dict[str, list[Tensor]] = {name: [] for name in SCENARIO_NAMES}
+        intervention_energies: dict[str, list[float]] = {
+            name: [] for name in SCENARIO_NAMES
+        }
+        prompts: list[Tensor] = []
         references: list[Tensor] = []
         texts: list[str] = []
         artist_keys: list[str] = []
@@ -616,6 +714,17 @@ class EpochControlEvaluationCallback(pl.Callback):
                     "collator must return audio_tokens and decoder_attention_mask"
                 )
             reference_audio, _ = decode(tokens, decoder_mask)
+            prompts.append(
+                fixed_audio_segment(
+                    reference_audio,
+                    sample_rate=sample_rate,
+                    start_seconds=0.0,
+                    duration_seconds=encoded_prompt_seconds,
+                )
+                .detach()
+                .float()
+                .cpu()
+            )
             references.append(
                 fixed_audio_segment(
                     reference_audio,
@@ -683,6 +792,14 @@ class EpochControlEvaluationCallback(pl.Callback):
                         time_mask=time_mask,
                     )
                 confidences[scenario.name].append(gt_confidence.cpu())
+                intervention_energy = teacher_forced.get("intervention_energy")
+                if (
+                    isinstance(intervention_energy, Tensor)
+                    and intervention_energy.numel()
+                ):
+                    intervention_energies[scenario.name].append(
+                        float(intervention_energy.detach().float().max().cpu().item())
+                    )
                 with torch.random.fork_rng(devices=cuda_devices):
                     torch.manual_seed(batch_seed)
                     generated_audio = generate(
@@ -700,6 +817,14 @@ class EpochControlEvaluationCallback(pl.Callback):
                     .cpu()
                 )
 
+        combined_confidences = {
+            name: torch.cat(confidences[name]) for name in SCENARIO_NAMES
+        }
+        self._diagnose_gt_ntc(combined_confidences, intervention_energies)
+        combined_intervention_energies = {
+            name: torch.tensor(intervention_energies[name], dtype=torch.float32)
+            for name in SCENARIO_NAMES
+        }
         return EpochControlArtifacts(
             epoch=epoch,
             sample_rate=sample_rate,
@@ -710,14 +835,27 @@ class EpochControlEvaluationCallback(pl.Callback):
             generated_audio={
                 name: torch.cat(generated[name]) for name in SCENARIO_NAMES
             },
-            gt_token_confidence={
-                name: torch.cat(confidences[name]) for name in SCENARIO_NAMES
+            gt_token_confidence=combined_confidences,
+            teacher_forced_intervention_energy=combined_intervention_energies,
+            prompt_audio=torch.cat(prompts),
+            artist_index_to_key={
+                int(index): str(key) for key, index in artist_to_index.items()
             },
         )
 
     def _runtime(self, name: str, default_factory: Callable[[], Any]) -> Any:
+        if self.cache_external_models and name in self._runtime_cache:
+            return self._runtime_cache[name]
         factory = self.runtime_factories.get(name, default_factory)
-        return factory()
+        runtime = factory()
+        if self.cache_external_models:
+            self._runtime_cache[name] = runtime
+        return runtime
+
+    def _clear_runtime_cache(self) -> None:
+        for runtime in self._runtime_cache.values():
+            _release_runtime(runtime)
+        self._runtime_cache.clear()
 
     def _metric_runtime_device(self, pl_module: pl.LightningModule) -> torch.device:
         return self.metric_device or torch.device(getattr(pl_module, "device", "cpu"))
@@ -870,6 +1008,107 @@ class EpochControlEvaluationCallback(pl.Callback):
         _release_runtime(vggish)
         return values
 
+    def _define_wandb_metrics(self, experiment: Any) -> None:
+        """Keep detailed numeric history queryable without 98 auto-panels."""
+
+        if self._wandb_metrics_defined:
+            return
+        define_metric = getattr(experiment, "define_metric", None)
+        if self.hide_detailed_metrics and callable(define_metric):
+            hidden_patterns = (
+                f"{self.numeric_namespace}/*",
+                # Hide panels created by runs using the previous callback keys.
+                "evaluation/control_metric_stats/*",
+                "evaluation/control_metrics",
+            )
+            for pattern in dict.fromkeys(hidden_patterns):
+                define_metric(pattern, hidden=True)
+        self._wandb_metrics_defined = True
+
+    def _qualitative_comparison_table(
+        self,
+        wandb_module: Any,
+        artifacts: EpochControlArtifacts,
+    ) -> Any | None:
+        """Build one matched row containing the six already-generated audios."""
+
+        if not self.qualitative_enabled:
+            return None
+        sample_count = len(artifacts.artist_keys)
+        if sample_count == 0:
+            raise ValueError("qualitative comparison needs at least one cohort sample")
+        index = self.qualitative_sample_index
+        if index >= sample_count:
+            raise ValueError(
+                "qualitative_sample_index is outside the fixed evaluation cohort: "
+                f"{index} >= {sample_count}"
+            )
+        if self._scenario_plan is None:
+            raise RuntimeError("qualitative comparison requires a scenario plan")
+        scenario_plan = {scenario.name: scenario for scenario in self._scenario_plan}
+        artist_names = artifacts.artist_index_to_key or {}
+        prompt = artifacts.prompt_audio
+        prefix_seconds = 0.0
+        if self.qualitative_include_prompt:
+            if prompt is None:
+                raise RuntimeError(
+                    "qualitative_include_prompt requires prompt_audio artifacts"
+                )
+            prefix_seconds = float(prompt.shape[-1]) / artifacts.sample_rate
+
+        audio_cells: list[Any] = []
+        for name in SCENARIO_NAMES:
+            tail = artifacts.generated_audio[name][index].detach().float().cpu()
+            if tail.ndim == 2:
+                tail = tail[0]
+            if tail.ndim != 1:
+                raise ValueError("qualitative generated audio must be mono or [C,T]")
+            waveform = tail
+            if self.qualitative_include_prompt:
+                shared_prefix = prompt[index].detach().float().cpu()
+                if shared_prefix.ndim == 2:
+                    shared_prefix = shared_prefix[0]
+                if shared_prefix.ndim != 1:
+                    raise ValueError("qualitative prompt audio must be mono or [C,T]")
+                waveform = torch.cat((shared_prefix, tail), dim=-1)
+
+            artist_ids = scenario_plan[name].artist_sets[index]
+            controlled_artists = [
+                artist_names.get(int(artist_id), f"artist_id:{int(artist_id)}")
+                for artist_id in artist_ids
+            ]
+            control_text = ", ".join(controlled_artists) or "none"
+            audio_cells.append(
+                wandb_module.Audio(
+                    waveform.numpy(),
+                    sample_rate=artifacts.sample_rate,
+                    caption=(
+                        f"{SCENARIO_LABELS[name]}; controlled artists: "
+                        f"{control_text}"
+                    ),
+                )
+            )
+
+        table = wandb_module.Table(
+            columns=[
+                "epoch",
+                "cohort_sample",
+                "target_artist",
+                "caption",
+                "shared_real_prefix_seconds",
+                *(SCENARIO_LABELS[name] for name in SCENARIO_NAMES),
+            ]
+        )
+        table.add_data(
+            artifacts.epoch,
+            index,
+            artifacts.artist_keys[index],
+            artifacts.texts[index],
+            prefix_seconds,
+            *audio_cells,
+        )
+        return table
+
     def _run_and_log(
         self,
         trainer: pl.Trainer,
@@ -905,6 +1144,7 @@ class EpochControlEvaluationCallback(pl.Callback):
 
         import wandb
 
+        self._define_wandb_metrics(experiment)
         table = wandb.Table(
             columns=["Scenario", *(METRIC_LABELS[name] for name in EVALUATION_METRICS)]
         )
@@ -915,12 +1155,38 @@ class EpochControlEvaluationCallback(pl.Callback):
             "trainer/global_step": trainer.global_step,
             f"{self.numeric_namespace}/epoch": epoch,
         }
+        qualitative_table = self._qualitative_comparison_table(wandb, artifacts)
+        if qualitative_table is not None:
+            payload[self.qualitative_log_key] = qualitative_table
         for scenario in SCENARIO_NAMES:
             for metric in EVALUATION_METRICS:
                 summary = summaries[scenario][metric]
                 prefix = f"{self.numeric_namespace}/{scenario}/{metric}"
                 payload[f"{prefix}/mean"] = summary.mean
                 payload[f"{prefix}/std"] = summary.std
+        for scenario, delta in self._gt_ntc_max_abs_deltas(
+            artifacts.gt_token_confidence
+        ).items():
+            payload[
+                f"{self.numeric_namespace}/diagnostics/gt_ntc/"
+                f"{scenario}/max_abs_delta_vs_no_control"
+            ] = delta
+        if artifacts.teacher_forced_intervention_energy is not None:
+            for (
+                scenario,
+                energy,
+            ) in artifacts.teacher_forced_intervention_energy.items():
+                energy = torch.as_tensor(energy).float().flatten()
+                if energy.numel():
+                    prefix = (
+                        f"{self.numeric_namespace}/diagnostics/gt_ntc/" f"{scenario}"
+                    )
+                    payload[f"{prefix}/intervention_energy_mean"] = float(
+                        energy.mean().item()
+                    )
+                    payload[f"{prefix}/intervention_energy_max"] = float(
+                        energy.max().item()
+                    )
         experiment.log(payload)
         self._logged_epoch = epoch
 

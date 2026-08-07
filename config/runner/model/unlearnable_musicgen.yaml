@@ -23,7 +23,7 @@ model_cfg:
     use_delay_pattern_teacher_forcing: true
     # Stage two may point this at a stage-one BaseGenerationModel .ckpt. Only
     # adapter tensors are loaded; Lightning optimizer/step state is ignored.
-    adapter_checkpoint: ${oc.env:ADAPTER_CHECKPOINT,null}
+    adapter_checkpoint: ${oc.env:ADAPTER_CHECKPOINT,logs/0807_130348@finetune_musicgen_with_adapter_rank16/ckpts/epoch000-step345.ckpt}
     adapter_checkpoint_strict: true
     model_kwargs:
       local_files_only: true
@@ -86,7 +86,7 @@ model_cfg:
     artist_contrastive:
       enabled: True
       weight: 1.0
-      margin: 0.005
+      margin: 0.05
     # Make -artist mirror the finite +artist improvement instead of maximizing
     # MusicGen CE without a bound.
     suppression_symmetry_weight: 0.5

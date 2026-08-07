@@ -83,8 +83,18 @@ epoch_control_evaluation:
   # false permits Hugging Face/Torch Hub/PaSST checkpoints to download online.
   local_files_only: false
   metric_device: null
-  log_key: evaluation/control_metrics
-  numeric_namespace: evaluation/control_metric_stats
+  # Keep one visible W&B panel. Detailed mean/std histories are still logged,
+  # but marked hidden so they remain available through the run API on demand.
+  log_key: Control Evaluation/Results
+  numeric_namespace: Control Evaluation Details
+  cache_external_models: true
+  hide_detailed_metrics: true
+  # Reuse one fixed cohort item and the six generated scenarios; this adds no
+  # extra MusicGen forward and includes the shared 5 s real prefix for listening.
+  qualitative_enabled: true
+  qualitative_log_key: Qualitative Comparison/Matched Six Scenarios
+  qualitative_sample_index: 0
+  qualitative_include_prompt: true
   fail_on_error: false
   generation_kwargs:
     do_sample: true
