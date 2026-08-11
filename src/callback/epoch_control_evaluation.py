@@ -35,8 +35,7 @@ from src.evaluation.metric_runtimes import (
     frechet_distance_from_embeddings,
 )
 from src.metric.forgetting import (
-    ground_truth_next_token_confidence_from_token_losses_per_sample,
-    ground_truth_next_token_confidence_per_sample,
+    ground_truth_next_token_confidence_from_rollout_scores,
 )
 
 
@@ -241,6 +240,8 @@ class EpochControlArtifacts:
     reference_audio: Tensor
     generated_audio: Mapping[str, Tensor]
     gt_token_confidence: Mapping[str, Tensor]
+    gt_token_confidence_by_position: Mapping[str, Tensor] | None = None
+    gt_token_confidence_positions: Tensor | None = None
     teacher_forced_intervention_energy: Mapping[str, Tensor] | None = None
     prompt_audio: Tensor | None = None
     artist_index_to_key: Mapping[int, str] | None = None
@@ -284,6 +285,14 @@ class EpochControlEvaluationCallback(pl.Callback):
         qualitative_log_key: str = "Qualitative Comparison/Matched Six Scenarios",
         qualitative_sample_index: int = 0,
         qualitative_include_prompt: bool = True,
+        gt_token_curve_max_positions: int = 100,
+        gt_token_curve_interval: int = 5,
+        gt_token_curve_table_log_key: str = (
+            "Control Evaluation/Rollout GT Token Confidence by Position"
+        ),
+        gt_token_curve_plot_log_key: str = (
+            "Control Evaluation/Rollout GT Token Confidence Curve"
+        ),
         fail_on_error: bool = False,
         generation_kwargs: Mapping[str, Any] | None = None,
         runtime_factories: Mapping[str, Callable[[], Any]] | None = None,
@@ -298,6 +307,8 @@ class EpochControlEvaluationCallback(pl.Callback):
             "clips_per_artist": clips_per_artist,
             "generation_batch_size": generation_batch_size,
             "metric_batch_size": metric_batch_size,
+            "gt_token_curve_max_positions": gt_token_curve_max_positions,
+            "gt_token_curve_interval": gt_token_curve_interval,
         }
         invalid = [name for name, value in positive_ints.items() if int(value) <= 0]
         if invalid:
@@ -348,6 +359,10 @@ class EpochControlEvaluationCallback(pl.Callback):
         self.qualitative_log_key = str(qualitative_log_key)
         self.qualitative_sample_index = int(qualitative_sample_index)
         self.qualitative_include_prompt = bool(qualitative_include_prompt)
+        self.gt_token_curve_max_positions = int(gt_token_curve_max_positions)
+        self.gt_token_curve_interval = int(gt_token_curve_interval)
+        self.gt_token_curve_table_log_key = str(gt_token_curve_table_log_key)
+        self.gt_token_curve_plot_log_key = str(gt_token_curve_plot_log_key)
         self.fail_on_error = bool(fail_on_error)
         self.generation_kwargs = dict(generation_kwargs or {})
         self.runtime_factories = dict(runtime_factories or {})
@@ -604,7 +619,7 @@ class EpochControlEvaluationCallback(pl.Callback):
 
     @staticmethod
     def _gt_ntc_max_abs_deltas(confidences: Mapping[str, Tensor]) -> dict[str, float]:
-        """Compare every controlled teacher-forced result with No Control."""
+        """Compare every controlled rollout score with No Control."""
 
         baseline = torch.as_tensor(confidences["no_control"]).double().flatten()
         deltas: dict[str, float] = {}
@@ -648,14 +663,15 @@ class EpochControlEvaluationCallback(pl.Callback):
         max_energy = max(observed_energies, default=0.0)
         if max_energy == 0.0:
             log.warning(
-                "GT-NTC is exactly identical for all six scenarios and the "
+                "Rollout GT-NTC is exactly identical for all six scenarios and the "
                 "controlled teacher-forcing intervention energy is zero. This "
                 "usually means the learned control residual is still zero (or "
                 "intervention_scale is zero), rather than a statistics mix-up."
             )
         else:
             log.warning(
-                "GT-NTC is exactly identical for all six scenarios even though "
+                "Rollout GT-NTC is exactly identical for all six scenarios even "
+                "though "
                 "controlled teacher-forcing intervention energy is non-zero "
                 "(max=%g). Inspect concept hooks and logits for this checkpoint.",
                 max_energy,
@@ -692,8 +708,27 @@ class EpochControlEvaluationCallback(pl.Callback):
             int(math.ceil(self.continuation_seconds * frame_rate)) + num_codebooks,
         )
 
+        curve_max_positions = min(
+            self.gt_token_curve_max_positions,
+            continuation_frames,
+        )
+        curve_positions = tuple(
+            dict.fromkeys(
+                (
+                    1,
+                    *range(
+                        self.gt_token_curve_interval,
+                        curve_max_positions + 1,
+                        self.gt_token_curve_interval,
+                    ),
+                )
+            )
+        )
         generated: dict[str, list[Tensor]] = {name: [] for name in SCENARIO_NAMES}
         confidences: dict[str, list[Tensor]] = {name: [] for name in SCENARIO_NAMES}
+        confidence_curves: dict[str, list[Tensor]] = {
+            name: [] for name in SCENARIO_NAMES
+        }
         intervention_energies: dict[str, list[float]] = {
             name: [] for name in SCENARIO_NAMES
         }
@@ -704,11 +739,15 @@ class EpochControlEvaluationCallback(pl.Callback):
         artist_ids: list[Tensor] = []
         decode = getattr(getattr(pl_module, "model", None), "decode_audio_tokens", None)
         run_generator = getattr(pl_module, "_run_generator", None)
-        generate = getattr(pl_module, "_generate_with_condition", None)
-        if not all(callable(method) for method in (decode, run_generator, generate)):
+        generate_output = getattr(
+            pl_module, "_generate_with_condition_output", None
+        )
+        if not all(
+            callable(method) for method in (decode, run_generator, generate_output)
+        ):
             raise RuntimeError(
                 "model must expose decode_audio_tokens(), _run_generator(), and "
-                "_generate_with_condition()"
+                "_generate_with_condition_output()"
             )
 
         for start in range(0, len(cohort), self.generation_batch_size):
@@ -771,36 +810,12 @@ class EpochControlEvaluationCallback(pl.Callback):
                     stage="val",
                     condition=condition,
                 )
-                logits = teacher_forced["logits"]
                 labels = teacher_forced["labels"]
-                token_losses = teacher_forced.get("token_losses")
-                time = torch.arange(labels.shape[-1], device=labels.device)
-                time_mask = (time >= prompt_frames) & (
-                    time < prompt_frames + continuation_frames
-                )
-                time_mask = time_mask.unsqueeze(0).expand(labels.shape[0], -1)
                 pad_token_id = int(
                     getattr(
                         getattr(pl_module, "model", None), "audio_pad_token_id", 2048
                     )
                 )
-                if isinstance(token_losses, Tensor):
-                    gt_confidence = (
-                        ground_truth_next_token_confidence_from_token_losses_per_sample(
-                            token_losses,
-                            labels,
-                            pad_token_id=pad_token_id,
-                            time_mask=time_mask,
-                        )
-                    )
-                else:
-                    gt_confidence = ground_truth_next_token_confidence_per_sample(
-                        logits,
-                        labels,
-                        pad_token_id=pad_token_id,
-                        time_mask=time_mask,
-                    )
-                confidences[scenario.name].append(gt_confidence.cpu())
                 intervention_energy = teacher_forced.get("intervention_energy")
                 if (
                     isinstance(intervention_energy, Tensor)
@@ -811,9 +826,32 @@ class EpochControlEvaluationCallback(pl.Callback):
                     )
                 with torch.random.fork_rng(devices=cuda_devices):
                     torch.manual_seed(batch_seed)
-                    generated_audio = generate(
+                    generation_output = generate_output(
                         prompted_batch, generation_kwargs, condition
                     )
+                generated_audio = generation_output.audio_values
+                rollout_scores = getattr(generation_output.raw_output, "scores", None)
+                if rollout_scores is None:
+                    raise RuntimeError(
+                        "MusicGen output_scores are required for rollout GT-NTC"
+                    )
+                sampled_curve = (
+                    ground_truth_next_token_confidence_from_rollout_scores(
+                        rollout_scores,
+                        labels,
+                        prompt_frames=prompt_frames,
+                        positions=curve_positions,
+                        pad_token_id=pad_token_id,
+                    )
+                )
+                confidence_curves[scenario.name].append(sampled_curve.cpu())
+                finite_curve = torch.isfinite(sampled_curve)
+                curve_count = finite_curve.sum(dim=1)
+                gt_confidence = (
+                    sampled_curve.masked_fill(~finite_curve, 0.0).sum(dim=1)
+                    / curve_count.clamp_min(1)
+                ).masked_fill(curve_count.eq(0), float("nan"))
+                confidences[scenario.name].append(gt_confidence.cpu())
                 generated[scenario.name].append(
                     fixed_audio_segment(
                         generated_audio,
@@ -845,6 +883,12 @@ class EpochControlEvaluationCallback(pl.Callback):
                 name: torch.cat(generated[name]) for name in SCENARIO_NAMES
             },
             gt_token_confidence=combined_confidences,
+            gt_token_confidence_by_position={
+                name: torch.cat(confidence_curves[name]) for name in SCENARIO_NAMES
+            },
+            gt_token_confidence_positions=torch.tensor(
+                curve_positions, dtype=torch.long
+            ),
             teacher_forced_intervention_energy=combined_intervention_energies,
             prompt_audio=torch.cat(prompts),
             artist_index_to_key={
@@ -1124,6 +1168,62 @@ class EpochControlEvaluationCallback(pl.Callback):
         )
         return table
 
+    def _gt_token_curve_payload(
+        self,
+        wandb_module: Any,
+        artifacts: EpochControlArtifacts,
+    ) -> dict[str, Any]:
+        """Build a six-scenario frame-position table and optional line plot."""
+
+        curves = artifacts.gt_token_confidence_by_position
+        positions = artifacts.gt_token_confidence_positions
+        if curves is None or positions is None:
+            return {}
+        positions = torch.as_tensor(positions).long().flatten()
+        if positions.numel() == 0:
+            return {}
+
+        means: dict[str, Tensor] = {}
+        for scenario in SCENARIO_NAMES:
+            if scenario not in curves:
+                raise KeyError(f"GT-NTC curve is missing scenario {scenario!r}")
+            values = torch.as_tensor(curves[scenario]).double()
+            if values.ndim != 2 or values.shape[1] != positions.numel():
+                raise ValueError(
+                    "GT-NTC curves must have shape [clips, positions]; "
+                    f"got {tuple(values.shape)} for {positions.numel()} positions"
+                )
+            finite = torch.isfinite(values)
+            count = finite.sum(dim=0)
+            total = values.masked_fill(~finite, 0.0).sum(dim=0)
+            mean = total / count.clamp_min(1)
+            means[scenario] = mean.masked_fill(count.eq(0), float("nan"))
+
+        table = wandb_module.Table(
+            columns=[
+                "Continuation Token Position",
+                *(SCENARIO_LABELS[name] for name in SCENARIO_NAMES),
+            ]
+        )
+        for column, position in enumerate(positions.tolist()):
+            table.add_data(
+                int(position),
+                *(float(means[name][column].item()) for name in SCENARIO_NAMES),
+            )
+
+        payload: dict[str, Any] = {self.gt_token_curve_table_log_key: table}
+        plot_api = getattr(wandb_module, "plot", None)
+        line_series = getattr(plot_api, "line_series", None)
+        if callable(line_series):
+            payload[self.gt_token_curve_plot_log_key] = line_series(
+                xs=positions.tolist(),
+                ys=[means[name].tolist() for name in SCENARIO_NAMES],
+                keys=[SCENARIO_LABELS[name] for name in SCENARIO_NAMES],
+                title="GT Token Confidence during Free Rollout",
+                xname="Continuation Token Position",
+            )
+        return payload
+
     def _run_and_log(
         self,
         trainer: pl.Trainer,
@@ -1173,6 +1273,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         qualitative_table = self._qualitative_comparison_table(wandb, artifacts)
         if qualitative_table is not None:
             payload[self.qualitative_log_key] = qualitative_table
+        payload.update(self._gt_token_curve_payload(wandb, artifacts))
         for scenario in SCENARIO_NAMES:
             for metric in EVALUATION_METRICS:
                 summary = summaries[scenario][metric]

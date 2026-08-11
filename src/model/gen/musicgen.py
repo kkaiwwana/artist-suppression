@@ -1467,6 +1467,10 @@ class MusicGen(nn.Module):
         }
         raw_output = self.backbone.generate(**prepared_inputs, **generation_kwargs)
         audio_values = getattr(raw_output, "audio_values", None)
+        if audio_values is None and not isinstance(raw_output, Tensor):
+            # Transformers returns a Generate*Output when step scores are
+            # requested and stores the decoded waveform in ``sequences``.
+            audio_values = getattr(raw_output, "sequences", None)
         if audio_values is None:
             audio_values = raw_output
         if not isinstance(audio_values, Tensor):

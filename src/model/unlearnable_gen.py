@@ -12,6 +12,7 @@ from torch import Tensor
 
 from src.metric.forgetting import GroundTruthNextTokenConfidence
 from src.model.base import BaseGenerationModel, _cfg_get, _instantiate_component
+from src.model.gen import GenerationOutput
 from src.model.module.concept_learner import ConceptCondition
 
 
@@ -1327,6 +1328,59 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             if handles:
                 self.model.remove_hidden_state_hooks(handles)
         return audio
+
+    @torch.no_grad()
+    def _generate_with_condition_output(
+        self,
+        batch: Mapping[str, Any],
+        generation_kwargs: Mapping[str, Any],
+        condition: Optional[ConceptCondition] = None,
+    ) -> GenerationOutput:
+        """Generate audio while retaining autoregressive per-step scores."""
+
+        controlled = dict(batch)
+        prompts = self._test_prompts(controlled)
+        generation_inputs = controlled.get("generation_inputs")
+        if generation_inputs is not None and not isinstance(
+            generation_inputs, Mapping
+        ):
+            raise TypeError("generation_inputs must be a mapping when supplied")
+        if prompts is None and generation_inputs is None:
+            raise ValueError("generation requires text or preprocessed inputs")
+
+        kwargs = dict(generation_kwargs)
+        kwargs["return_dict_in_generate"] = True
+        kwargs["output_scores"] = True
+        handles = []
+        if condition is not None:
+            handles = self.model.register_concept_learner_hooks(
+                self.concept_learner,
+                condition=condition,
+                module_names=self.hook_blocks,
+                intervention_scale=self.intervention_scale,
+                batch_repeat_interleave=int(
+                    getattr(self.model, "num_codebooks", 1) or 1
+                ),
+                cfg_conditional_only=self._generation_uses_cfg(
+                    {**controlled, "generation_kwargs": kwargs}
+                ),
+            )
+        try:
+            output = self.model.generate(
+                text=prompts,
+                inputs=generation_inputs,
+                return_dict=True,
+                **kwargs,
+            )
+        finally:
+            if handles:
+                self.model.remove_hidden_state_hooks(handles)
+        if not isinstance(output, GenerationOutput):
+            raise TypeError("score-preserving generation must return GenerationOutput")
+        scores = getattr(output.raw_output, "scores", None)
+        if scores is None:
+            raise RuntimeError("MusicGen generation did not return per-step scores")
+        return output
 
     @torch.no_grad()
     def test_step(

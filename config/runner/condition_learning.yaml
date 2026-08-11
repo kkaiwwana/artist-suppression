@@ -91,6 +91,13 @@ epoch_control_evaluation:
   qualitative_log_key: Qualitative Comparison/Matched Six Scenarios
   qualitative_sample_index: 0
   qualitative_include_prompt: true
+  # Only the first 5 s are real tokens. Later scores are conditioned on the
+  # model's sampled history at positions 1, 5, 10, ..., 100. Each curve point
+  # averages cohort clips/codebooks; the main table averages these same points.
+  gt_token_curve_max_positions: 100
+  gt_token_curve_interval: 5
+  gt_token_curve_table_log_key: Control Evaluation/Rollout GT Token Confidence by Position
+  gt_token_curve_plot_log_key: Control Evaluation/Rollout GT Token Confidence Curve
   fail_on_error: false
   generation_kwargs:
     do_sample: true

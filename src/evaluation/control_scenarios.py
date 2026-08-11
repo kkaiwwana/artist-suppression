@@ -41,7 +41,7 @@ EVALUATION_METRICS = (
 )
 
 METRIC_LABELS = {
-    "gt_token_confidence": "GT Token Confidence",
+    "gt_token_confidence": "Rollout GT Token Confidence",
     "target_attribution_rate": "Target Attribution Rate",
     "target_artist_confidence": "Target Artist Confidence",
     "target_artist_rank": "Target Artist Rank",
@@ -52,8 +52,8 @@ METRIC_LABELS = {
 }
 
 # GT token probabilities can differ between controls well below 1e-4. Keeping
-# more digits for that cell prevents a genuinely different teacher-forced
-# result from looking identical after table formatting.
+# more digits for that cell prevents a genuinely different rollout result from
+# looking identical after table formatting.
 METRIC_PRECISIONS = {
     "gt_token_confidence": 8,
 }

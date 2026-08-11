@@ -6,6 +6,7 @@ from .forgetting import (
     OtherArtistAccuracy,
     TargetArtistAttributionRate,
     ground_truth_next_token_confidence_from_token_losses_per_sample,
+    ground_truth_next_token_confidence_from_rollout_scores,
     ground_truth_next_token_confidence_per_sample,
 )
 from .quality import (
@@ -37,5 +38,6 @@ __all__ = [
     "TempoError",
     "VGGishAudioEmbedding",
     "ground_truth_next_token_confidence_from_token_losses_per_sample",
+    "ground_truth_next_token_confidence_from_rollout_scores",
     "ground_truth_next_token_confidence_per_sample",
 ]
