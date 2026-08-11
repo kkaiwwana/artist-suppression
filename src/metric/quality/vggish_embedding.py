@@ -8,6 +8,8 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
+from src.evaluation._external_output import quiet_external_output
+
 from ._audio import extract_tensor_output, to_mono_batch
 
 
@@ -15,14 +17,15 @@ def _load_default_vggish() -> nn.Module:
     """Load torchvggish and its public checkpoint through Torch Hub."""
 
     try:
-        return torch.hub.load(
-            "harritaylor/torchvggish",
-            "vggish",
-            trust_repo=True,
-            preprocess=False,
-            postprocess=False,
-            device="cpu",
-        )
+        with quiet_external_output():
+            return torch.hub.load(
+                "harritaylor/torchvggish",
+                "vggish",
+                trust_repo=True,
+                preprocess=False,
+                postprocess=False,
+                device="cpu",
+            )
     except RuntimeError as exc:
         # torch.hub reports a missing package from hubconf.py as RuntimeError,
         # while genuine download/checkpoint errors should retain their details.
@@ -67,6 +70,7 @@ class VGGishAudioEmbedding(nn.Module):
         remove_final_relu: bool = True,
         window_batch_size: int = 64,
         lazy_load: bool = True,
+        quiet_backend: bool = True,
     ) -> None:
         super().__init__()
         if sample_rate <= 0:
@@ -81,6 +85,7 @@ class VGGishAudioEmbedding(nn.Module):
         self.peak_normalize = bool(peak_normalize)
         self.remove_final_relu = bool(remove_final_relu)
         self.window_batch_size = int(window_batch_size)
+        self.quiet_backend = bool(quiet_backend)
         self.register_buffer("_device_anchor", torch.empty(0), persistent=False)
 
         if self.model is not None:
@@ -121,12 +126,15 @@ class VGGishAudioEmbedding(nn.Module):
         return model
 
     def _ensure_model(self) -> Any:
-        if self.model is None:
-            loader = self.model_loader or _load_default_vggish
-            self.model = loader()
+        # encode methods run under inference_mode. Construct and place lazy
+        # weights outside it so a cached encoder remains movable across epochs.
+        with torch.inference_mode(False):
             if self.model is None:
-                raise RuntimeError("model_loader returned None.")
-        return self._configure_model(self.model)
+                loader = self.model_loader or _load_default_vggish
+                self.model = loader()
+                if self.model is None:
+                    raise RuntimeError("model_loader returned None.")
+            return self._configure_model(self.model)
 
     def _normalize_waveforms(self, waveform: Tensor) -> Tensor:
         if not self.peak_normalize:
@@ -179,26 +187,30 @@ class VGGishAudioEmbedding(nn.Module):
         return examples
 
     def _run_model(self, examples: Tensor, batch_size: int) -> Tensor:
-        model = self._ensure_model()
-        outputs: list[Tensor] = []
-        for start in range(0, examples.shape[0], batch_size):
-            window_batch = examples[start : start + batch_size].to(
-                device=self.device, dtype=torch.float32
-            )
-            output = model(window_batch)
-            embeddings = extract_tensor_output(output, preferred_key="embeddings")
-            embeddings = embeddings.to(device=self.device)
-            if embeddings.ndim == 1:
-                embeddings = embeddings.unsqueeze(0)
-            if embeddings.ndim > 2:
-                embeddings = embeddings.flatten(start_dim=1)
-            if embeddings.ndim != 2 or embeddings.shape[0] != window_batch.shape[0]:
-                raise ValueError(
-                    "VGGish model must return [windows, embedding_dim]; "
-                    f"got {tuple(embeddings.shape)} for "
-                    f"{window_batch.shape[0]} windows."
+        with quiet_external_output(self.quiet_backend):
+            model = self._ensure_model()
+            outputs: list[Tensor] = []
+            for start in range(0, examples.shape[0], batch_size):
+                window_batch = examples[start : start + batch_size].to(
+                    device=self.device, dtype=torch.float32
                 )
-            outputs.append(embeddings.float())
+                output = model(window_batch)
+                embeddings = extract_tensor_output(output, preferred_key="embeddings")
+                embeddings = embeddings.to(device=self.device)
+                if embeddings.ndim == 1:
+                    embeddings = embeddings.unsqueeze(0)
+                if embeddings.ndim > 2:
+                    embeddings = embeddings.flatten(start_dim=1)
+                if (
+                    embeddings.ndim != 2
+                    or embeddings.shape[0] != window_batch.shape[0]
+                ):
+                    raise ValueError(
+                        "VGGish model must return [windows, embedding_dim]; "
+                        f"got {tuple(embeddings.shape)} for "
+                        f"{window_batch.shape[0]} windows."
+                    )
+                outputs.append(embeddings.float())
         return torch.cat(outputs, dim=0)
 
     @torch.inference_mode()

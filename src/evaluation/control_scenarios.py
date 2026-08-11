@@ -144,7 +144,8 @@ def build_control_scenarios(
 
     ``suppress_multiple_target`` always contains the row's target artist.
     ``suppress_multiple_others`` never contains it. All multi-hot rows sum to
-    one so changing the number of artists does not silently scale the control.
+    one as a stable set representation; ConceptLearner composes the selected
+    artists by summing their separately decoded centered residuals.
     """
 
     ids = torch.as_tensor(target_ids, dtype=torch.long)

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import io
+from contextlib import contextmanager
 from threading import RLock
 from typing import Any, Iterator
 
@@ -12,6 +11,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torchmetrics import Metric
+
+from src.evaluation._external_output import quiet_external_output
 
 from ._audio import match_batch, to_mono_batch
 
@@ -63,7 +64,7 @@ def _load_default_passt_classifier() -> nn.Module:
         ) from exc
     # hear21passt prints the full network repr while constructing the public
     # model. That is useful interactively but overwhelms epoch-evaluation logs.
-    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+    with quiet_external_output():
         return get_basic_model(mode="logits")
 
 
@@ -135,6 +136,7 @@ class PaSSTKLDivergence(Metric):
         patch_torch_stft: bool = True,
         epsilon: float = 1e-6,
         lazy_load: bool = True,
+        quiet_backend: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -154,6 +156,7 @@ class PaSSTKLDivergence(Metric):
         # record AudioCraft's epsilon in experiment metadata. The default score
         # path uses log_softmax directly and does not perturb probabilities.
         self.epsilon = float(epsilon)
+        self.quiet_backend = bool(quiet_backend)
 
         for direction in ("pq", "qp", "both"):
             self.add_state(
@@ -188,12 +191,16 @@ class PaSSTKLDivergence(Metric):
         return classifier
 
     def _ensure_classifier(self) -> Any:
-        if self.classifier is None:
-            loader = self.classifier_loader or _load_default_passt_classifier
-            self.classifier = loader()
+        # pairwise_scores() runs under inference_mode, but the lazily created
+        # weights must remain normal tensors so the cached model can later move
+        # from GPU to CPU and back across epoch callbacks.
+        with torch.inference_mode(False):
             if self.classifier is None:
-                raise RuntimeError("classifier_loader returned None.")
-        return self._prepare_classifier(self.classifier)
+                loader = self.classifier_loader or _load_default_passt_classifier
+                self.classifier = loader()
+                if self.classifier is None:
+                    raise RuntimeError("classifier_loader returned None.")
+            return self._prepare_classifier(self.classifier)
 
     def _prepare_audio(self, audio: Tensor | Any, sample_rate: int) -> Tensor:
         if sample_rate <= 0:
@@ -220,11 +227,12 @@ class PaSSTKLDivergence(Metric):
         return waveform
 
     def _classify(self, waveform: Tensor) -> Tensor:
-        classifier = self._ensure_classifier()
         device = self.pq_sum.device
         waveform = waveform.to(device=device, dtype=torch.float32)
-        with _legacy_stft_compatibility(self.patch_torch_stft):
-            output = classifier(waveform)
+        with quiet_external_output(self.quiet_backend):
+            classifier = self._ensure_classifier()
+            with _legacy_stft_compatibility(self.patch_torch_stft):
+                output = classifier(waveform)
         logits = _extract_logits(output).to(device=device)
         if logits.shape[0] != waveform.shape[0]:
             raise ValueError(

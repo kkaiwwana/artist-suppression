@@ -52,11 +52,6 @@ validation_audio:
   generation_kwargs:
     do_sample: true
     guidance_scale: 3.0
-    # Match the sampling filter used by the released MusicGen recipe. Without
-    # an explicit value, recent Transformers versions may sample from all 2048
-    # EnCodec entries because the legacy checkpoint stores top_k as null.
-    # top_k: 250
-    # temperature: 1.0
     max_new_tokens: 250
 
 # Fixed, matched evaluation after every epoch: 4 artists x 16 clips x six
@@ -65,8 +60,8 @@ validation_audio:
 epoch_control_evaluation:
   enabled: true
   every_n_epochs: 1
-  num_artists: 4
-  clips_per_artist: 16
+  num_artists: 8
+  clips_per_artist: 32
   generation_batch_size: 16
   metric_batch_size: 8
   generation_seed: ${exp.seed}
@@ -75,7 +70,7 @@ epoch_control_evaluation:
   continuation_seconds: 10.0
   multi_min_artists: 2
   multi_max_artists: 5
-  classifier_checkpoint_path: ${oc.env:ARTIST_CLASSIFIER_CHECKPOINT,null}
+  classifier_checkpoint_path: ${oc.env:ARTIST_CLASSIFIER_CHECKPOINT,logs/0731_144615@trian_classifier_64cls_continuation/ckpts/last.ckpt}
   classifier_config_path: ${oc.env:ARTIST_CLASSIFIER_CONFIG,null}
   classifier_model_name_or_path: ${oc.env:CLASSIFIER_MERT_MODEL,null}
   mert_model_name_or_path: ${oc.env:MERT_MODEL,m-a-p/MERT-v1-95M}
@@ -88,6 +83,7 @@ epoch_control_evaluation:
   log_key: Control Evaluation/Results
   numeric_namespace: Control Evaluation Details
   cache_external_models: true
+  quiet_external_models: true
   hide_detailed_metrics: true
   # Reuse one fixed cohort item and the six generated scenarios; this adds no
   # extra MusicGen forward and includes the shared 5 s real prefix for listening.
@@ -99,8 +95,6 @@ epoch_control_evaluation:
   generation_kwargs:
     do_sample: true
     guidance_scale: 3.0
-    # top_k: 250
-    # temperature: 1.0
 
 
 trainer:

@@ -242,10 +242,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
 
         Joint controls are used only by the scheduled symmetry branch. Each
         selected row contains its ground-truth artist plus distinct uniformly
-        sampled artists, and the resulting multi-hot weights sum to one. The
-        local generator is derived from the configured seed, epoch, and batch
-        index so resuming an epoch reproduces the same controls without
-        consuming PyTorch's global RNG state.
+        sampled artists. The normalized multi-hot tensor represents set
+        membership; ConceptLearner separately decodes and sums the selected
+        single-artist residuals. The local generator is derived from the
+        configured seed, epoch, and batch index so resuming an epoch reproduces
+        the same controls without consuming PyTorch's global RNG state.
 
         Returns the condition, fraction of joint rows, and mean number of
         suppressed artists per row.

@@ -94,8 +94,9 @@ model_cfg:
     # likelihood gain. A non-positive gain maps to zero in the implementation.
     suppression_symmetry_max_gain: 0.3
     # On symmetry steps, independently replace half of the per-row negative
-    # controls with a normalized mixture that always contains the row's target
-    # artist. Sampling is reproducible from seed, epoch, and batch index.
+    # controls with a set that always contains the row's target artist. Each
+    # selected artist residual is decoded separately and summed. Sampling is
+    # reproducible from seed, epoch, and batch index.
     multi_suppression:
       enabled: true
       probability: 0.5

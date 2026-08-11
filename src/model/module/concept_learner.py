@@ -48,12 +48,20 @@ class ConceptCondition:
             concepts excluded, ``[batch, num_concepts]``.
         direction: Per-sample signed strength: zero, positive, or negative.
         active: One when a non-empty concept selection is present.
+        component_peer_weights: Optional single-concept peer matrix used to
+            compose multi-concept controls as a sum of learned single-concept
+            centered residuals, ``[num_concepts, num_concepts]``.
+        has_multi: Whether any prepared row selects more than one concept.
+        has_single: Whether any prepared row selects exactly one concept.
     """
 
     weights: Tensor
     peer_weights: Tensor
     direction: Tensor
     active: Tensor
+    component_peer_weights: Optional[Tensor] = None
+    has_multi: bool = False
+    has_single: bool = False
 
 
 class ConceptStyleBank(nn.Module):
@@ -118,8 +126,10 @@ class _ConditionOnlyStyleDecoder(nn.Module):
             raise ValueError("style and depth must have matching [batch, dim] shapes")
         condition = self.condition_projection(torch.cat((style, depth), dim=-1))
         residual = self.output_projection(F.gelu(condition))
-        shape = (residual.shape[0],) + (1,) * (len(hidden_shape) - 2) + (
-            residual.shape[-1],
+        shape = (
+            (residual.shape[0],)
+            + (1,) * (len(hidden_shape) - 2)
+            + (residual.shape[-1],)
         )
         return residual.view(shape).expand(*hidden_shape[:-1], residual.shape[-1])
 
@@ -132,6 +142,10 @@ class ConceptLearner(nn.Module):
     over enabled intervention blocks. Top-k softmax neighbours form a local
     musical reference for each artist. ``"genre"`` and ``"uniform"`` peer
     modes remain available for controlled ablations.
+
+    Multi-concept conditions preserve the single-concept semantics: every
+    selected concept is decoded and centered independently, then the residuals
+    are summed before the shared RMS cap and block scale are applied.
 
     The model is intentionally additive and condition-only.  There is no text
     router, hidden-state router, replacement predictor, or runtime concept
@@ -215,9 +229,7 @@ class ConceptLearner(nn.Module):
             )
         if cap_intervention_rms is None:
             cap_intervention_rms = (
-                True
-                if normalize_intervention is None
-                else bool(normalize_intervention)
+                True if normalize_intervention is None else bool(normalize_intervention)
             )
         self.cap_intervention_rms = bool(cap_intervention_rms)
         # Attribute retained for code/configs written before the no-amplification
@@ -238,9 +250,7 @@ class ConceptLearner(nn.Module):
         # its useful gate gradient without permitting unbounded intervention.
         initial_ratio = float(initial_block_scale) / self.max_block_scale
         raw_initial_scale = self.max_block_scale * math.atanh(initial_ratio)
-        self.block_scales = nn.Parameter(
-            torch.full((num_blocks,), raw_initial_scale)
-        )
+        self.block_scales = nn.Parameter(torch.full((num_blocks,), raw_initial_scale))
         self.style_decoder = _ConditionOnlyStyleDecoder(
             hidden_dim,
             style_dim,
@@ -379,9 +389,13 @@ class ConceptLearner(nn.Module):
         styles = self.style_bank.deterministic_embeddings
         if detach_styles:
             styles = styles.detach()
-        depth = self.depth_embeddings.weight[block_index].unsqueeze(0).expand(
-            self.num_concepts,
-            -1,
+        depth = (
+            self.depth_embeddings.weight[block_index]
+            .unsqueeze(0)
+            .expand(
+                self.num_concepts,
+                -1,
+            )
         )
         residuals = self.style_decoder(
             styles,
@@ -389,6 +403,47 @@ class ConceptLearner(nn.Module):
             torch.Size((self.num_concepts, 1, self.hidden_dim)),
         )
         return residuals[:, 0, :]
+
+    def _decoded_peer_vectors(
+        self,
+        peer_weights: Tensor,
+        block_index: int,
+        reference: Tensor,
+    ) -> Tensor:
+        """Decode unique peers and return one reference vector per row."""
+
+        used = torch.nonzero(
+            peer_weights.detach().sum(dim=0) > 0,
+            as_tuple=False,
+        ).flatten()
+        if used.numel() == 0:
+            return reference.new_zeros(peer_weights.shape[0], self.hidden_dim)
+
+        styles = self.style_bank.deterministic_embeddings.index_select(
+            0,
+            used.to(self.style_bank.deterministic_embeddings.device),
+        ).detach()
+        depth = (
+            self.depth_embeddings.weight[block_index]
+            .unsqueeze(0)
+            .expand(
+                used.numel(),
+                -1,
+            )
+        )
+        decoded = self.style_decoder(
+            styles,
+            depth,
+            torch.Size((used.numel(), 1, self.hidden_dim)),
+        )[:, 0, :].to(reference)
+        local_weights = peer_weights.detach().index_select(
+            1,
+            used.to(peer_weights.device),
+        )
+        # Autocast may return fp16/bf16 from matmul even when ``reference`` is
+        # fp32. The caller aggregates these vectors into reference-typed
+        # buffers, so restore the exact dtype after the autocast operation.
+        return (local_weights.to(reference) @ decoded).to(reference)
 
     def _decoded_peer_residual(
         self,
@@ -398,34 +453,16 @@ class ConceptLearner(nn.Module):
     ) -> Tensor:
         """Decode only unique top-k peers used by the current batch."""
 
-        used = torch.nonzero(
-            peer_weights.detach().sum(dim=0) > 0,
-            as_tuple=False,
-        ).flatten()
-        if used.numel() == 0:
-            return torch.zeros_like(hidden_state)
-
-        styles = self.style_bank.deterministic_embeddings.index_select(
-            0,
-            used.to(self.style_bank.deterministic_embeddings.device),
-        ).detach()
-        depth = self.depth_embeddings.weight[block_index].unsqueeze(0).expand(
-            used.numel(),
-            -1,
+        peer_vector = self._decoded_peer_vectors(
+            peer_weights,
+            block_index,
+            hidden_state,
         )
-        decoded = self.style_decoder(
-            styles,
-            depth,
-            torch.Size((used.numel(), 1, self.hidden_dim)),
-        )[:, 0, :].to(hidden_state)
-        local_weights = peer_weights.detach().index_select(
-            1,
-            used.to(peer_weights.device),
+        peer_shape = (
+            (peer_vector.shape[0],)
+            + (1,) * (hidden_state.ndim - 2)
+            + (peer_vector.shape[-1],)
         )
-        peer_vector = local_weights @ decoded
-        peer_shape = (peer_vector.shape[0],) + (1,) * (
-            hidden_state.ndim - 2
-        ) + (peer_vector.shape[-1],)
         return peer_vector.view(peer_shape).expand_as(hidden_state)
 
     @torch.no_grad()
@@ -450,9 +487,7 @@ class ConceptLearner(nn.Module):
                 residuals = residuals - residuals.mean(dim=0, keepdim=True)
                 residuals = F.normalize(residuals, dim=-1, eps=1e-8)
                 similarities.append(residuals @ residuals.transpose(0, 1))
-            current = torch.stack(similarities).mean(dim=0).to(
-                self.peer_similarity_ema
-            )
+            current = torch.stack(similarities).mean(dim=0).to(self.peer_similarity_ema)
 
         if int(self.peer_similarity_updates.item()) == 0:
             self.peer_similarity_ema.copy_(current)
@@ -464,7 +499,9 @@ class ConceptLearner(nn.Module):
         self.peer_similarity_updates.add_(1)
         return self.peer_similarity_ema
 
-    def _uniform_peer_matrix(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+    def _uniform_peer_matrix(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> Tensor:
         if self.num_concepts == 1:
             return torch.zeros(1, 1, device=device, dtype=dtype)
         matrix = torch.ones(
@@ -583,11 +620,25 @@ class ConceptLearner(nn.Module):
         if direction_tensor.shape != (weights.shape[0],):
             raise ValueError("direction must be scalar or have shape [batch]")
         active = weights.sum(dim=-1).gt(0).to(weights)
+        cardinality = weights.gt(0).sum(dim=-1)
+        has_multi = bool(cardinality.gt(1).any())
+        has_single = bool(cardinality.eq(1).any())
+        component_peer_weights = None
+        if has_multi:
+            identity = torch.eye(
+                self.num_concepts,
+                device=weights.device,
+                dtype=weights.dtype,
+            )
+            component_peer_weights = self._peer_weights(identity)
         return ConceptCondition(
             weights=weights,
             peer_weights=self._peer_weights(weights),
             direction=direction_tensor,
             active=active,
+            component_peer_weights=component_peer_weights,
+            has_multi=has_multi,
+            has_single=has_single,
         )
 
     def positive_condition(self, concept_ids: ConceptIds) -> ConceptCondition:
@@ -602,7 +653,9 @@ class ConceptLearner(nn.Module):
         *,
         device: Optional[torch.device | str] = None,
     ) -> ConceptCondition:
-        return self.prepare_condition(batch_size=batch_size, direction=0.0, device=device)
+        return self.prepare_condition(
+            batch_size=batch_size, direction=0.0, device=device
+        )
 
     @staticmethod
     def _expand_batch_rows(
@@ -675,10 +728,7 @@ class ConceptLearner(nn.Module):
         epsilon = self.intervention_norm_epsilon
         residual_float = residual.float()
         residual_rms = (
-            residual_float.square()
-            .mean(dim=-1, keepdim=True)
-            .clamp_min(epsilon)
-            .sqrt()
+            residual_float.square().mean(dim=-1, keepdim=True).clamp_min(epsilon).sqrt()
         )
         hidden_rms = (
             hidden_state.detach()
@@ -691,6 +741,91 @@ class ConceptLearner(nn.Module):
         shrink = (hidden_rms / residual_rms).clamp(max=1.0)
         capped_residual = residual_float * shrink
         return capped_residual.to(dtype=residual.dtype)
+
+    def _summed_component_residuals(
+        self,
+        weights: Tensor,
+        component_peer_weights: Optional[Tensor],
+        block_index: int,
+        hidden_state: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Sum the learned single-concept target and peer residuals per row."""
+
+        selected = weights.gt(0)
+        pairs = torch.nonzero(selected, as_tuple=False)
+        if pairs.numel() == 0:
+            zero = torch.zeros_like(hidden_state)
+            return zero, zero
+
+        row_ids = pairs[:, 0]
+        concept_ids = pairs[:, 1]
+        unique_concepts, inverse = torch.unique(
+            concept_ids,
+            sorted=False,
+            return_inverse=True,
+        )
+        styles = self.style_bank.deterministic_embeddings.index_select(
+            0,
+            unique_concepts.to(self.style_bank.deterministic_embeddings.device),
+        )
+        depth = (
+            self.depth_embeddings.weight[block_index]
+            .unsqueeze(0)
+            .expand(
+                unique_concepts.numel(),
+                -1,
+            )
+        )
+        unique_target_vectors = self.style_decoder(
+            styles,
+            depth,
+            torch.Size((unique_concepts.numel(), 1, self.hidden_dim)),
+        )[:, 0, :].to(hidden_state)
+
+        if component_peer_weights is None:
+            identity = torch.eye(
+                self.num_concepts,
+                device=weights.device,
+                dtype=weights.dtype,
+            )
+            component_peer_weights = self._peer_weights(identity)
+        peers = component_peer_weights.index_select(
+            0,
+            unique_concepts.to(component_peer_weights.device),
+        )
+        unique_peer_vectors = self._decoded_peer_vectors(
+            peers,
+            block_index,
+            hidden_state,
+        )
+        target_vectors = unique_target_vectors.index_select(
+            0,
+            inverse.to(unique_target_vectors.device),
+        ).to(hidden_state)
+        peer_vectors = unique_peer_vectors.index_select(
+            0,
+            inverse.to(unique_peer_vectors.device),
+        ).to(hidden_state)
+
+        target_sum = hidden_state.new_zeros(
+            weights.shape[0], self.hidden_dim
+        ).index_add(
+            0,
+            row_ids.to(hidden_state.device),
+            target_vectors,
+        )
+        peer_sum = hidden_state.new_zeros(weights.shape[0], self.hidden_dim).index_add(
+            0,
+            row_ids.to(hidden_state.device),
+            peer_vectors,
+        )
+        residual_shape = (
+            (weights.shape[0],) + (1,) * (hidden_state.ndim - 2) + (self.hidden_dim,)
+        )
+        return (
+            target_sum.view(residual_shape).expand_as(hidden_state),
+            peer_sum.view(residual_shape).expand_as(hidden_state),
+        )
 
     def forward(
         self,
@@ -747,31 +882,65 @@ class ConceptLearner(nn.Module):
         direction = direction.to(hidden_state)
         active = active.to(hidden_state)
 
-        depth = self.depth_embeddings.weight[block_index].to(hidden_state)
-        depth = depth.unsqueeze(0).expand(hidden_state.shape[0], -1)
-        target_style = self.style_bank(weights).to(hidden_state)
-        target_residual = self.style_decoder(
-            target_style,
-            depth,
-            hidden_state.shape,
-        )
-        # Average *decoded* neighbour residuals. This deliberately differs
-        # from decoding the average embedding because the decoder is nonlinear.
-        # Neighbour embeddings and weights are detached so artist j cannot win
-        # by moving its references; the shared decoder/depth path stays
-        # differentiable so common decoder biases cancel in both value and
-        # gradient.
-        peer_residual = self._decoded_peer_residual(
-            peer_weights,
-            block_index,
-            hidden_state,
-        )
+        target_residual: Tensor
+        peer_residual: Tensor
+        if condition.has_multi:
+            target_residual, peer_residual = self._summed_component_residuals(
+                weights,
+                condition.component_peer_weights,
+                block_index,
+                hidden_state,
+            )
+            if condition.has_single:
+                # A scheduled training batch may mix single and multi rows.
+                # Preserve the established single path exactly while replacing
+                # only multi rows with the sum of their single-artist residuals.
+                depth = self.depth_embeddings.weight[block_index].to(hidden_state)
+                depth = depth.unsqueeze(0).expand(hidden_state.shape[0], -1)
+                original_target = self.style_decoder(
+                    self.style_bank(weights).to(hidden_state),
+                    depth,
+                    hidden_state.shape,
+                )
+                original_peer = self._decoded_peer_residual(
+                    peer_weights,
+                    block_index,
+                    hidden_state,
+                )
+                multi_rows = weights.gt(0).sum(dim=-1).gt(1)
+                row_shape = (hidden_state.shape[0],) + (1,) * (hidden_state.ndim - 1)
+                multi_rows = multi_rows.view(row_shape)
+                target_residual = torch.where(
+                    multi_rows,
+                    target_residual,
+                    original_target,
+                )
+                peer_residual = torch.where(
+                    multi_rows,
+                    peer_residual,
+                    original_peer,
+                )
+        else:
+            depth = self.depth_embeddings.weight[block_index].to(hidden_state)
+            depth = depth.unsqueeze(0).expand(hidden_state.shape[0], -1)
+            target_style = self.style_bank(weights).to(hidden_state)
+            target_residual = self.style_decoder(
+                target_style,
+                depth,
+                hidden_state.shape,
+            )
+            # Average *decoded* neighbour residuals. Neighbour embeddings and
+            # weights are detached so artist j cannot move its references; the
+            # shared decoder/depth path remains differentiable.
+            peer_residual = self._decoded_peer_residual(
+                peer_weights,
+                block_index,
+                hidden_state,
+            )
         concept_residual = target_residual - peer_residual
         row_shape = (hidden_state.shape[0],) + (1,) * (hidden_state.ndim - 1)
         signed_residual = (
-            active.view(row_shape)
-            * direction.view(row_shape)
-            * concept_residual
+            active.view(row_shape) * direction.view(row_shape) * concept_residual
         )
         if cfg_conditional_only and copies >= 2:
             cfg_gate = hidden_state.new_ones(hidden_state.shape[0])
@@ -819,20 +988,25 @@ class ConceptLearner(nn.Module):
             dtype=torch.bool,
         )
         similarity_values = self.peer_similarity_ema[off_diagonal]
-        peer_entropy = -(
-            peer_weights.clamp_min(1e-12)
-            * peer_weights.clamp_min(1e-12).log()
-        ).sum(dim=-1).mean()
+        peer_entropy = (
+            -(peer_weights.clamp_min(1e-12) * peer_weights.clamp_min(1e-12).log())
+            .sum(dim=-1)
+            .mean()
+        )
         return {
             "style_bank_l2": embeddings.square().mean(),
             "concept_center": centered.mean(dim=0).square().mean(),
             "concept_spread_monitor": centered.square().mean(),
-            "peer_similarity_mean_monitor": similarity_values.mean()
-            if similarity_values.numel()
-            else embeddings.new_zeros(()),
-            "peer_similarity_max_monitor": similarity_values.max()
-            if similarity_values.numel()
-            else embeddings.new_zeros(()),
+            "peer_similarity_mean_monitor": (
+                similarity_values.mean()
+                if similarity_values.numel()
+                else embeddings.new_zeros(())
+            ),
+            "peer_similarity_max_monitor": (
+                similarity_values.max()
+                if similarity_values.numel()
+                else embeddings.new_zeros(())
+            ),
             "peer_entropy_monitor": peer_entropy,
             "peer_similarity_updates_monitor": embeddings.new_tensor(
                 float(self.peer_similarity_updates.item())
@@ -846,10 +1020,9 @@ class ConceptLearner(nn.Module):
         concept_center_weight: float = 0.0,
     ) -> Dict[str, Tensor]:
         regularizers = self.regularization_losses()
-        total = (
-            regularizers["style_bank_l2"] * float(style_bank_l2_weight)
-            + regularizers["concept_center"] * float(concept_center_weight)
-        )
+        total = regularizers["style_bank_l2"] * float(
+            style_bank_l2_weight
+        ) + regularizers["concept_center"] * float(concept_center_weight)
         return {**regularizers, "loss": total}
 
 

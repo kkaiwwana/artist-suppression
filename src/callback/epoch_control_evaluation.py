@@ -13,6 +13,7 @@ import pytorch_lightning as pl
 import torch
 from torch import Tensor
 
+from src.evaluation._external_output import quiet_external_output
 from src.evaluation.control_scenarios import (
     EVALUATION_METRICS,
     METRIC_LABELS,
@@ -194,14 +195,19 @@ def _vggish_embeddings(runtime: Any, audio: Tensor, *, sample_rate: int) -> Tens
 def _release_runtime(runtime: Any) -> None:
     """Offload a cached runtime to CPU between heavyweight metric passes."""
 
-    if callable(getattr(runtime, "to", None)):
-        runtime.to("cpu")
-    else:
-        model = getattr(runtime, "model", None)
-        if model is not None and callable(getattr(model, "to", None)):
-            model.to("cpu")
-        if hasattr(runtime, "device"):
-            runtime.device = torch.device("cpu")
+    # Lightning validation commonly encloses callbacks in inference_mode.
+    # Module.to() is allowed there, but a device copy performed in that scope
+    # can manufacture inference-tensor parameters which fail when the cached
+    # runtime is reused by a later callback outside that exact scope.
+    with torch.inference_mode(False):
+        if callable(getattr(runtime, "to", None)):
+            runtime.to("cpu")
+        else:
+            model = getattr(runtime, "model", None)
+            if model is not None and callable(getattr(model, "to", None)):
+                model.to("cpu")
+            if hasattr(runtime, "device"):
+                runtime.device = torch.device("cpu")
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -210,16 +216,17 @@ def _release_runtime(runtime: Any) -> None:
 def _move_runtime(runtime: Any, device: torch.device) -> Any:
     """Move a metric runtime without requiring every wrapper to define to()."""
 
-    move = getattr(runtime, "to", None)
-    if callable(move):
-        moved = move(device)
-        return runtime if moved is None else moved
-    model = getattr(runtime, "model", None)
-    if model is not None and callable(getattr(model, "to", None)):
-        model.to(device)
-    if hasattr(runtime, "device"):
-        runtime.device = device
-    return runtime
+    with torch.inference_mode(False):
+        move = getattr(runtime, "to", None)
+        if callable(move):
+            moved = move(device)
+            return runtime if moved is None else moved
+        model = getattr(runtime, "model", None)
+        if model is not None and callable(getattr(model, "to", None)):
+            model.to(device)
+        if hasattr(runtime, "device"):
+            runtime.device = device
+        return runtime
 
 
 @dataclass(frozen=True)
@@ -271,6 +278,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         log_key: str = "Control Evaluation/Results",
         numeric_namespace: str = "Control Evaluation Details",
         cache_external_models: bool = True,
+        quiet_external_models: bool = True,
         hide_detailed_metrics: bool = True,
         qualitative_enabled: bool = True,
         qualitative_log_key: str = "Qualitative Comparison/Matched Six Scenarios",
@@ -334,6 +342,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         self.log_key = str(log_key)
         self.numeric_namespace = str(numeric_namespace).rstrip("/")
         self.cache_external_models = bool(cache_external_models)
+        self.quiet_external_models = bool(quiet_external_models)
         self.hide_detailed_metrics = bool(hide_detailed_metrics)
         self.qualitative_enabled = bool(qualitative_enabled)
         self.qualitative_log_key = str(qualitative_log_key)
@@ -847,7 +856,13 @@ class EpochControlEvaluationCallback(pl.Callback):
         if self.cache_external_models and name in self._runtime_cache:
             return self._runtime_cache[name]
         factory = self.runtime_factories.get(name, default_factory)
-        runtime = factory()
+        log.info("Loading external evaluation runtime '%s' (cached after load)", name)
+        with quiet_external_output(self.quiet_external_models):
+            # Model parameters created under inference_mode are special
+            # inference tensors. They cannot safely survive the CPU/GPU
+            # offload-and-reuse cycle used by this cache.
+            with torch.inference_mode(False):
+                runtime = factory()
         if self.cache_external_models:
             self._runtime_cache[name] = runtime
         return runtime
@@ -954,7 +969,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         def passt_factory() -> Any:
             from src.metric.quality import PaSSTKLDivergence
 
-            return PaSSTKLDivergence()
+            return PaSSTKLDivergence(quiet_backend=self.quiet_external_models)
 
         passt = _move_runtime(self._runtime("passt", passt_factory), device)
         for name in SCENARIO_NAMES:
@@ -970,7 +985,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         def vggish_factory() -> Any:
             from src.metric.quality import VGGishAudioEmbedding
 
-            return VGGishAudioEmbedding()
+            return VGGishAudioEmbedding(quiet_backend=self.quiet_external_models)
 
         vggish = _move_runtime(self._runtime("vggish", vggish_factory), device)
         unique_artists = tuple(dict.fromkeys(artifacts.artist_keys))
