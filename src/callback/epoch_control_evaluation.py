@@ -42,6 +42,16 @@ from src.metric.forgetting import (
 log = logging.getLogger(__name__)
 
 
+_GT_TOKEN_CURVE_COLORS = {
+    "no_control": "#4C78A8",
+    "enhance_target": "#F58518",
+    "suppress_single_target": "#E45756",
+    "suppress_multiple_target": "#B279A2",
+    "suppress_single_others": "#54A24B",
+    "suppress_multiple_others": "#72B7B2",
+}
+
+
 def _map_tensors(value: Any, function: Callable[[Tensor], Tensor]) -> Any:
     if isinstance(value, Tensor):
         return function(value)
@@ -291,7 +301,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             "Control Evaluation/Rollout GT Token Confidence by Position"
         ),
         gt_token_curve_plot_log_key: str = (
-            "Control Evaluation/Rollout GT Token Confidence Curve"
+            "Control Evaluation/Rollout GT Token Confidence Curves by Epoch"
         ),
         fail_on_error: bool = False,
         generation_kwargs: Mapping[str, Any] | None = None,
@@ -1173,7 +1183,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         wandb_module: Any,
         artifacts: EpochControlArtifacts,
     ) -> dict[str, Any]:
-        """Build a six-scenario frame-position table and optional line plot."""
+        """Build a raw table and a fixed-color image for W&B's step slider."""
 
         curves = artifacts.gt_token_confidence_by_position
         positions = artifacts.gt_token_confidence_positions
@@ -1212,15 +1222,51 @@ class EpochControlEvaluationCallback(pl.Callback):
             )
 
         payload: dict[str, Any] = {self.gt_token_curve_table_log_key: table}
-        plot_api = getattr(wandb_module, "plot", None)
-        line_series = getattr(plot_api, "line_series", None)
-        if callable(line_series):
-            payload[self.gt_token_curve_plot_log_key] = line_series(
-                xs=positions.tolist(),
-                ys=[means[name].tolist() for name in SCENARIO_NAMES],
-                keys=[SCENARIO_LABELS[name] for name in SCENARIO_NAMES],
-                title="GT Token Confidence during Free Rollout",
-                xname="Continuation Token Position",
+        image_type = getattr(wandb_module, "Image", None)
+        if callable(image_type):
+            # Construct the figure directly instead of through pyplot so epoch-end
+            # evaluation does not accumulate figures in matplotlib's global state.
+            # W&B 0.28 nevertheless expects the pyplot module to be initialized
+            # while it type-checks a matplotlib Figure.
+            from matplotlib import pyplot as _matplotlib_pyplot  # noqa: F401
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.figure import Figure
+
+            figure = Figure(figsize=(10.5, 6.2), layout="constrained")
+            FigureCanvasAgg(figure)
+            axes = figure.add_subplot(1, 1, 1)
+            x_values = positions.tolist()
+            for scenario in SCENARIO_NAMES:
+                axes.plot(
+                    x_values,
+                    means[scenario].tolist(),
+                    color=_GT_TOKEN_CURVE_COLORS[scenario],
+                    linestyle="-",
+                    linewidth=2.2,
+                    label=SCENARIO_LABELS[scenario],
+                )
+            axes.set(
+                title=(
+                    "GT Token Confidence during Free Rollout "
+                    f"(Epoch {artifacts.epoch})"
+                ),
+                xlabel="Continuation Token Position",
+                ylabel="Mean GT Token Confidence",
+                ylim=(0.0, 1.0),
+            )
+            axes.grid(True, color="#D9D9D9", linewidth=0.8, alpha=0.7)
+            axes.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.14),
+                ncol=3,
+                frameon=False,
+            )
+            payload[self.gt_token_curve_plot_log_key] = image_type(
+                figure,
+                caption=(
+                    f"Epoch {artifacts.epoch}: fixed colors identify the six "
+                    "control scenarios."
+                ),
             )
         return payload
 

@@ -97,7 +97,9 @@ epoch_control_evaluation:
   gt_token_curve_max_positions: 100
   gt_token_curve_interval: 5
   gt_token_curve_table_log_key: Control Evaluation/Rollout GT Token Confidence by Position
-  gt_token_curve_plot_log_key: Control Evaluation/Rollout GT Token Confidence Curve
+  # Fixed-color image media; W&B keeps one snapshot per epoch under this key
+  # and exposes its native step slider without a custom Vega chart.
+  gt_token_curve_plot_log_key: Control Evaluation/Rollout GT Token Confidence Curves by Epoch
   fail_on_error: false
   generation_kwargs:
     do_sample: true
