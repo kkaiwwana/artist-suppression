@@ -110,9 +110,12 @@ class _ConditionOnlyStyleDecoder(nn.Module):
         controller_dim: int,
     ) -> None:
         super().__init__()
-        self.condition_projection = nn.Linear(
-            style_dim + depth_dim,
-            controller_dim,
+        self.condition_projection = nn.Sequential(
+            nn.Linear(style_dim + depth_dim, controller_dim,),
+            nn.GELU(),
+            nn.Linear(controller_dim, 2 * controller_dim,),
+            nn.GELU(),
+            nn.Linear(2 * controller_dim, controller_dim,),
         )
         self.output_projection = nn.Linear(controller_dim, hidden_dim)
 

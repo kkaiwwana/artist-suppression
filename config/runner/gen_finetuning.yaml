@@ -51,8 +51,6 @@ validation_audio:
     # Match the sampling filter used by the released MusicGen recipe. Without
     # an explicit value, recent Transformers versions may sample from all 2048
     # EnCodec entries because the legacy checkpoint stores top_k as null.
-    # top_k: 250
-    # temperature: 1.0
     max_new_tokens: 250
 
 

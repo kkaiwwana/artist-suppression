@@ -38,11 +38,11 @@ model_cfg:
     num_blocks: 24
     concept_name: auto
     controller_dim: 512
-    depth_dim: 64
+    depth_dim: 512
     initial_block_scale: 0.0
     # The learned raw parameter is mapped through tanh before injection. This
     # is a hard safety bound, not merely a regularizer.
-    max_block_scale: 0.3
+    max_block_scale: 1.0
     # Clip a token's direction only when its RMS exceeds the incoming hidden
     # RMS. Small/immature residuals are never amplified. Together with the
     # bounded scale this guarantees RMS(delta_h) / RMS(h) <= abs(scale).
@@ -63,7 +63,7 @@ model_cfg:
 
   # Default to the upper half of the decoder. CLI overrides can still select a
   # different subset, but unlisted blocks receive exactly zero intervention.
-  hook_blocks: [18, 19, 20, 21, 22, 23]
+  hook_blocks: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
   intervention_scale: 1.0
   validation_full_precision: true
 
@@ -79,20 +79,20 @@ model_cfg:
     # satisfied, this path stops asking for a stronger controller.
     positive_weight: 0.0
     # Require +artist to improve artist-A likelihood by a finite margin.
-    positive_margin: 0.3
+    positive_margin: 0.5
     positive_margin_weight: 1.0
     # The correct artist must outperform a deterministic wrong-artist control.
     # The wrong branch is detached, so this cannot learn by damaging it.
     artist_contrastive:
       enabled: True
       weight: 1.0
-      margin: 0.05
+      margin: 0.1
     # Make -artist mirror the finite +artist improvement instead of maximizing
     # MusicGen CE without a bound.
     suppression_symmetry_weight: 0.5
     # Clamp the target degradation even if +artist happens to produce a large
     # likelihood gain. A non-positive gain maps to zero in the implementation.
-    suppression_symmetry_max_gain: 0.3
+    suppression_symmetry_max_gain: 0.5
     # On symmetry steps, independently replace half of the per-row negative
     # controls with a set that always contains the row's target artist. Each
     # selected artist residual is decoded separately and summed. Sampling is
@@ -106,7 +106,7 @@ model_cfg:
     preservation:
       enabled: true
       weight: 1.0
-      margin: 0.1
+      margin: 0.3
 
   losses:
     style_bank_l2_weight: 0.0001
@@ -114,15 +114,13 @@ model_cfg:
     # Per-branch energy is the SUM of squared relative RMS over all hooked
     # blocks. Penalize only the excess above one network-wide RMS budget, so
     # adding more hook blocks can no longer hide intervention through a mean.
-    intervention_energy_weight: 100.0
-    intervention_global_rms_budget: 0.01
+    intervention_energy_weight: 10.0
+    intervention_global_rms_budget: 0.1
     intervention_energy_epsilon: 1.0e-6
 
   test_generation:
     do_sample: true
     guidance_scale: 3.0
-    top_k: 250
-    temperature: 1.0
     max_new_tokens: 512
 
 log_backend: wandb

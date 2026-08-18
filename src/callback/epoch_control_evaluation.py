@@ -250,6 +250,7 @@ class EpochControlArtifacts:
     reference_audio: Tensor
     generated_audio: Mapping[str, Tensor]
     gt_token_confidence: Mapping[str, Tensor]
+    generation_mode: str = "continuation"
     gt_token_confidence_by_position: Mapping[str, Tensor] | None = None
     gt_token_confidence_positions: Tensor | None = None
     teacher_forced_intervention_energy: Mapping[str, Tensor] | None = None
@@ -261,8 +262,9 @@ class EpochControlEvaluationCallback(pl.Callback):
     """Evaluate six matched controls on a fixed balanced training cohort.
 
     Evaluation is queued after validation and flushed at the next train epoch
-    boundary (or fit end), after checkpoint callbacks have consumed validation
-    metrics. The cohort and multi-artist sets stay fixed for the full run.
+    boundary. The final pending epoch is flushed at train end, while the strategy,
+    devices, and logger are still active. The cohort and multi-artist sets stay
+    fixed for the full run.
     """
 
     def __init__(
@@ -275,6 +277,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         metric_batch_size: int = 8,
         generation_seed: int = 2026,
         cohort_seed: int = 42,
+        generation_mode: str = "continuation",
         audio_prompt_seconds: float = 5.0,
         continuation_seconds: float = 10.0,
         multi_min_artists: int = 2,
@@ -303,6 +306,8 @@ class EpochControlEvaluationCallback(pl.Callback):
         gt_token_curve_plot_log_key: str = (
             "Control Evaluation/Rollout GT Token Confidence Curves by Epoch"
         ),
+        gt_token_curve_y_padding_fraction: float = 0.12,
+        gt_token_curve_min_y_span: float = 0.02,
         fail_on_error: bool = False,
         generation_kwargs: Mapping[str, Any] | None = None,
         runtime_factories: Mapping[str, Callable[[], Any]] | None = None,
@@ -323,12 +328,26 @@ class EpochControlEvaluationCallback(pl.Callback):
         invalid = [name for name, value in positive_ints.items() if int(value) <= 0]
         if invalid:
             raise ValueError(f"positive values required for: {', '.join(invalid)}")
-        if audio_prompt_seconds <= 0 or continuation_seconds <= 0:
-            raise ValueError("audio prompt and continuation durations must be positive")
+        generation_mode = str(generation_mode).strip().lower()
+        if generation_mode not in {"text", "continuation"}:
+            raise ValueError("generation_mode must be 'text' or 'continuation'")
+        if continuation_seconds <= 0:
+            raise ValueError("continuation_seconds must be positive")
+        if audio_prompt_seconds < 0 or (
+            generation_mode == "continuation" and audio_prompt_seconds <= 0
+        ):
+            raise ValueError(
+                "audio_prompt_seconds must be positive in continuation mode and "
+                "non-negative in text mode"
+            )
         if multi_min_artists < 2 or multi_max_artists < multi_min_artists:
             raise ValueError("multi bounds must satisfy 2 <= min <= max")
         if int(qualitative_sample_index) < 0:
             raise ValueError("qualitative_sample_index must be non-negative")
+        if float(gt_token_curve_y_padding_fraction) < 0:
+            raise ValueError("gt_token_curve_y_padding_fraction must be non-negative")
+        if not 0 < float(gt_token_curve_min_y_span) <= 1:
+            raise ValueError("gt_token_curve_min_y_span must be in (0, 1]")
 
         self.every_n_epochs = int(every_n_epochs)
         self.num_artists = int(num_artists)
@@ -337,6 +356,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         self.metric_batch_size = int(metric_batch_size)
         self.generation_seed = int(generation_seed)
         self.cohort_seed = int(cohort_seed)
+        self.generation_mode = generation_mode
         self.audio_prompt_seconds = float(audio_prompt_seconds)
         self.continuation_seconds = float(continuation_seconds)
         self.multi_min_artists = int(multi_min_artists)
@@ -373,6 +393,10 @@ class EpochControlEvaluationCallback(pl.Callback):
         self.gt_token_curve_interval = int(gt_token_curve_interval)
         self.gt_token_curve_table_log_key = str(gt_token_curve_table_log_key)
         self.gt_token_curve_plot_log_key = str(gt_token_curve_plot_log_key)
+        self.gt_token_curve_y_padding_fraction = float(
+            gt_token_curve_y_padding_fraction
+        )
+        self.gt_token_curve_min_y_span = float(gt_token_curve_min_y_span)
         self.fail_on_error = bool(fail_on_error)
         self.generation_kwargs = dict(generation_kwargs or {})
         self.runtime_factories = dict(runtime_factories or {})
@@ -445,7 +469,11 @@ class EpochControlEvaluationCallback(pl.Callback):
     ) -> None:
         self._flush_pending(trainer, pl_module)
 
-    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+    def on_train_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        """Flush the final epoch before Lightning tears down strategy and logging."""
+
         try:
             self._flush_pending(trainer, pl_module)
         finally:
@@ -478,6 +506,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             self._logged_epoch = epoch
             self._barrier(trainer, "epoch-control-evaluation-end")
             return
+        log.info("Starting control evaluation for epoch %d", epoch)
         modules = getattr(pl_module, "modules", None)
         module_modes = (
             tuple((module, bool(module.training)) for module in modules())
@@ -489,6 +518,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             pl_module.eval()
         try:
             self._run_and_log(trainer, pl_module, epoch)
+            log.info("Finished control evaluation for epoch %d", epoch)
         except Exception:  # noqa: BLE001 - this is an optional expensive monitor
             self._logged_epoch = epoch
             if self.fail_on_error:
@@ -696,7 +726,12 @@ class EpochControlEvaluationCallback(pl.Callback):
         dataset, records, artist_to_index, collator = self._training_data(trainer)
         device = torch.device(getattr(pl_module, "device", "cpu"))
         frame_rate = float(audio_frame_rate(pl_module))
-        prompt_frames = max(1, int(round(self.audio_prompt_seconds * frame_rate)))
+        use_audio_prompt = self.generation_mode == "continuation"
+        prompt_frames = (
+            max(1, int(round(self.audio_prompt_seconds * frame_rate)))
+            if use_audio_prompt
+            else 0
+        )
         continuation_frames = max(1, int(round(self.continuation_seconds * frame_rate)))
         encoded_prompt_seconds = prompt_frames / frame_rate
         cohort = self._ensure_cohort(
@@ -772,17 +807,18 @@ class EpochControlEvaluationCallback(pl.Callback):
                     "collator must return audio_tokens and decoder_attention_mask"
                 )
             reference_audio, _ = decode(tokens, decoder_mask)
-            prompts.append(
-                fixed_audio_segment(
-                    reference_audio,
-                    sample_rate=sample_rate,
-                    start_seconds=0.0,
-                    duration_seconds=encoded_prompt_seconds,
+            if use_audio_prompt:
+                prompts.append(
+                    fixed_audio_segment(
+                        reference_audio,
+                        sample_rate=sample_rate,
+                        start_seconds=0.0,
+                        duration_seconds=encoded_prompt_seconds,
+                    )
+                    .detach()
+                    .float()
+                    .cpu()
                 )
-                .detach()
-                .float()
-                .cpu()
-            )
             references.append(
                 fixed_audio_segment(
                     reference_audio,
@@ -794,7 +830,11 @@ class EpochControlEvaluationCallback(pl.Callback):
                 .float()
                 .cpu()
             )
-            prompted_batch = attach_audio_prompt(batch, prompt_frames=prompt_frames)
+            generation_batch = (
+                attach_audio_prompt(batch, prompt_frames=prompt_frames)
+                if use_audio_prompt
+                else batch
+            )
             texts.extend(str(value) for value in batch.get("text", ()))
             artist_keys.extend(item.artist_key for item in items)
             artist_ids.append(
@@ -837,7 +877,7 @@ class EpochControlEvaluationCallback(pl.Callback):
                 with torch.random.fork_rng(devices=cuda_devices):
                     torch.manual_seed(batch_seed)
                     generation_output = generate_output(
-                        prompted_batch, generation_kwargs, condition
+                        generation_batch, generation_kwargs, condition
                     )
                 generated_audio = generation_output.audio_values
                 rollout_scores = getattr(generation_output.raw_output, "scores", None)
@@ -893,6 +933,7 @@ class EpochControlEvaluationCallback(pl.Callback):
                 name: torch.cat(generated[name]) for name in SCENARIO_NAMES
             },
             gt_token_confidence=combined_confidences,
+            generation_mode=self.generation_mode,
             gt_token_confidence_by_position={
                 name: torch.cat(confidence_curves[name]) for name in SCENARIO_NAMES
             },
@@ -900,7 +941,7 @@ class EpochControlEvaluationCallback(pl.Callback):
                 curve_positions, dtype=torch.long
             ),
             teacher_forced_intervention_energy=combined_intervention_energies,
-            prompt_audio=torch.cat(prompts),
+            prompt_audio=torch.cat(prompts) if prompts else None,
             artist_index_to_key={
                 int(index): str(key) for key, index in artist_to_index.items()
             },
@@ -1118,11 +1159,16 @@ class EpochControlEvaluationCallback(pl.Callback):
         artist_names = artifacts.artist_index_to_key or {}
         prompt = artifacts.prompt_audio
         prefix_seconds = 0.0
-        if self.qualitative_include_prompt:
-            if prompt is None:
+        include_prompt = self.qualitative_include_prompt and prompt is not None
+        if (
+            self.qualitative_include_prompt
+            and artifacts.generation_mode == "continuation"
+        ):
+            if not include_prompt:
                 raise RuntimeError(
                     "qualitative_include_prompt requires prompt_audio artifacts"
                 )
+        if include_prompt:
             prefix_seconds = float(prompt.shape[-1]) / artifacts.sample_rate
 
         audio_cells: list[Any] = []
@@ -1133,7 +1179,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             if tail.ndim != 1:
                 raise ValueError("qualitative generated audio must be mono or [C,T]")
             waveform = tail
-            if self.qualitative_include_prompt:
+            if include_prompt:
                 shared_prefix = prompt[index].detach().float().cpu()
                 if shared_prefix.ndim == 2:
                     shared_prefix = shared_prefix[0]
@@ -1161,6 +1207,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         table = wandb_module.Table(
             columns=[
                 "epoch",
+                "generation_mode",
                 "cohort_sample",
                 "target_artist",
                 "caption",
@@ -1170,6 +1217,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         )
         table.add_data(
             artifacts.epoch,
+            artifacts.generation_mode,
             index,
             artifacts.artist_keys[index],
             artifacts.texts[index],
@@ -1209,9 +1257,34 @@ class EpochControlEvaluationCallback(pl.Callback):
             mean = total / count.clamp_min(1)
             means[scenario] = mean.masked_fill(count.eq(0), float("nan"))
 
+        all_means = torch.cat([means[name] for name in SCENARIO_NAMES])
+        finite_means = all_means[torch.isfinite(all_means)]
+        if finite_means.numel():
+            data_min = float(finite_means.min().item())
+            data_max = float(finite_means.max().item())
+            data_span = data_max - data_min
+            y_span = max(
+                self.gt_token_curve_min_y_span,
+                data_span * (1.0 + 2.0 * self.gt_token_curve_y_padding_fraction),
+            )
+            y_span = min(1.0, y_span)
+            y_center = 0.5 * (data_min + data_max)
+            y_lower = y_center - 0.5 * y_span
+            y_upper = y_center + 0.5 * y_span
+            if y_lower < 0.0:
+                y_upper -= y_lower
+                y_lower = 0.0
+            if y_upper > 1.0:
+                y_lower -= y_upper - 1.0
+                y_upper = 1.0
+            y_lower = max(0.0, y_lower)
+            y_upper = min(1.0, y_upper)
+        else:
+            y_lower, y_upper = 0.0, 1.0
+
         table = wandb_module.Table(
             columns=[
-                "Continuation Token Position",
+                "Rollout Token Position",
                 *(SCENARIO_LABELS[name] for name in SCENARIO_NAMES),
             ]
         )
@@ -1231,6 +1304,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             from matplotlib import pyplot as _matplotlib_pyplot  # noqa: F401
             from matplotlib.backends.backend_agg import FigureCanvasAgg
             from matplotlib.figure import Figure
+            from matplotlib.ticker import FormatStrFormatter
 
             figure = Figure(figsize=(10.5, 6.2), layout="constrained")
             FigureCanvasAgg(figure)
@@ -1248,12 +1322,14 @@ class EpochControlEvaluationCallback(pl.Callback):
             axes.set(
                 title=(
                     "GT Token Confidence during Free Rollout "
-                    f"(Epoch {artifacts.epoch})"
+                    f"({artifacts.generation_mode}, Epoch {artifacts.epoch}, "
+                    "zoomed y-axis)"
                 ),
-                xlabel="Continuation Token Position",
+                xlabel="Rollout Token Position",
                 ylabel="Mean GT Token Confidence",
-                ylim=(0.0, 1.0),
+                ylim=(y_lower, y_upper),
             )
+            axes.yaxis.set_major_formatter(FormatStrFormatter("%.4f"))
             axes.grid(True, color="#D9D9D9", linewidth=0.8, alpha=0.7)
             axes.legend(
                 loc="upper center",
@@ -1265,7 +1341,8 @@ class EpochControlEvaluationCallback(pl.Callback):
                 figure,
                 caption=(
                     f"Epoch {artifacts.epoch}: fixed colors identify the six "
-                    "control scenarios."
+                    "control scenarios; zoomed y-axis "
+                    f"[{y_lower:.4f}, {y_upper:.4f}]."
                 ),
             )
         return payload

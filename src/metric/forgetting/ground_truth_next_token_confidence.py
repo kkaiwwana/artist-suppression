@@ -166,11 +166,12 @@ def ground_truth_next_token_confidence_from_rollout_scores(
     ``generation_scores`` must be the per-step processed scores returned by
     MusicGen generation with ``output_scores=True``. At rollout step ``s``,
     each row is conditioned on the model tokens sampled at all earlier steps.
-    For raw continuation frame ``r`` and codebook ``q``, MusicGen's delay
+    For raw rollout frame ``r`` and codebook ``q``, MusicGen's delay
     pattern predicts the corresponding GT token at rollout step ``r + q``.
 
     The result has shape ``[B, P]`` and averages valid codebooks at each of the
-    requested one-based continuation ``positions``. These are probabilities
+    requested one-based rollout ``positions``. ``prompt_frames=0`` scores
+    a text-only rollout from its first audio frame. These are probabilities
     under the actual sampling distribution, after generation processors such
     as classifier-free guidance, temperature, and top-k filtering.
     """
@@ -183,8 +184,8 @@ def ground_truth_next_token_confidence_from_rollout_scores(
         )
     if labels.dtype.is_floating_point or labels.dtype.is_complex:
         raise TypeError("ground_truth_labels must contain integer token ids")
-    if prompt_frames <= 0:
-        raise ValueError("prompt_frames must be positive")
+    if prompt_frames < 0:
+        raise ValueError("prompt_frames must be non-negative")
     requested = torch.as_tensor(positions, dtype=torch.long).flatten()
     if requested.numel() == 0 or bool((requested <= 0).any()):
         raise ValueError("positions must contain positive one-based indices")
