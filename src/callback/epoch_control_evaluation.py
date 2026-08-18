@@ -34,6 +34,7 @@ from src.evaluation.metric_runtimes import (
     cosine_similarity_rows,
     frechet_distance_from_embeddings,
 )
+from src.evaluation.scenario_statistics import evaluate_scenario_statistics
 from src.metric.forgetting import (
     ground_truth_next_token_confidence_from_rollout_scores,
 )
@@ -126,7 +127,7 @@ def _passt_per_sample(
 
     # TorchMetric's public aggregate API can still produce exact per-clip
     # values by evaluating one pair at a time. This is slower, but preserves
-    # the requested population standard deviation without private attributes.
+    # the paired observations needed by the artist-level statistical tests.
     update = getattr(runtime, "update", None)
     compute = getattr(runtime, "compute", None)
     reset = getattr(runtime, "reset", None)
@@ -308,6 +309,19 @@ class EpochControlEvaluationCallback(pl.Callback):
         ),
         gt_token_curve_y_padding_fraction: float = 0.12,
         gt_token_curve_min_y_span: float = 0.02,
+        statistical_tests_enabled: bool = True,
+        statistical_omnibus_log_key: str = (
+            "Statistical Analysis/Scenario Omnibus Tests"
+        ),
+        statistical_posthoc_log_key: str = (
+            "Statistical Analysis/Paired Post-hoc Tests"
+        ),
+        statistical_num_permutations: int = 10_000,
+        statistical_num_bootstrap_resamples: int = 2_000,
+        statistical_confidence: float = 0.95,
+        statistical_alpha: float = 0.05,
+        statistical_exact_max_artists: int = 16,
+        statistical_seed: int | None = None,
         fail_on_error: bool = False,
         generation_kwargs: Mapping[str, Any] | None = None,
         runtime_factories: Mapping[str, Callable[[], Any]] | None = None,
@@ -324,6 +338,10 @@ class EpochControlEvaluationCallback(pl.Callback):
             "metric_batch_size": metric_batch_size,
             "gt_token_curve_max_positions": gt_token_curve_max_positions,
             "gt_token_curve_interval": gt_token_curve_interval,
+            "statistical_num_permutations": statistical_num_permutations,
+            "statistical_num_bootstrap_resamples": (
+                statistical_num_bootstrap_resamples
+            ),
         }
         invalid = [name for name, value in positive_ints.items() if int(value) <= 0]
         if invalid:
@@ -348,6 +366,12 @@ class EpochControlEvaluationCallback(pl.Callback):
             raise ValueError("gt_token_curve_y_padding_fraction must be non-negative")
         if not 0 < float(gt_token_curve_min_y_span) <= 1:
             raise ValueError("gt_token_curve_min_y_span must be in (0, 1]")
+        if not 0 < float(statistical_confidence) < 1:
+            raise ValueError("statistical_confidence must be in (0, 1)")
+        if not 0 < float(statistical_alpha) < 1:
+            raise ValueError("statistical_alpha must be in (0, 1)")
+        if int(statistical_exact_max_artists) < 0:
+            raise ValueError("statistical_exact_max_artists must be non-negative")
 
         self.every_n_epochs = int(every_n_epochs)
         self.num_artists = int(num_artists)
@@ -397,6 +421,19 @@ class EpochControlEvaluationCallback(pl.Callback):
             gt_token_curve_y_padding_fraction
         )
         self.gt_token_curve_min_y_span = float(gt_token_curve_min_y_span)
+        self.statistical_tests_enabled = bool(statistical_tests_enabled)
+        self.statistical_omnibus_log_key = str(statistical_omnibus_log_key)
+        self.statistical_posthoc_log_key = str(statistical_posthoc_log_key)
+        self.statistical_num_permutations = int(statistical_num_permutations)
+        self.statistical_num_bootstrap_resamples = int(
+            statistical_num_bootstrap_resamples
+        )
+        self.statistical_confidence = float(statistical_confidence)
+        self.statistical_alpha = float(statistical_alpha)
+        self.statistical_exact_max_artists = int(statistical_exact_max_artists)
+        self.statistical_seed = int(
+            generation_seed if statistical_seed is None else statistical_seed
+        )
         self.fail_on_error = bool(fail_on_error)
         self.generation_kwargs = dict(generation_kwargs or {})
         self.runtime_factories = dict(runtime_factories or {})
@@ -1347,6 +1384,104 @@ class EpochControlEvaluationCallback(pl.Callback):
             )
         return payload
 
+    def _statistical_table_payload(
+        self,
+        wandb_module: Any,
+        values: Mapping[str, Mapping[str, Any]],
+        artifacts: EpochControlArtifacts,
+    ) -> dict[str, Any]:
+        """Build two fixed W&B tables without creating per-test chart panels."""
+
+        if not self.statistical_tests_enabled:
+            return {}
+        omnibus_results, pairwise_results = evaluate_scenario_statistics(
+            values,
+            metrics=EVALUATION_METRICS,
+            scenarios=SCENARIO_NAMES,
+            artist_keys=artifacts.artist_keys,
+            num_permutations=self.statistical_num_permutations,
+            num_bootstrap_resamples=self.statistical_num_bootstrap_resamples,
+            confidence=self.statistical_confidence,
+            alpha=self.statistical_alpha,
+            exact_max_pairs=self.statistical_exact_max_artists,
+            seed=self.statistical_seed + int(artifacts.epoch),
+        )
+
+        omnibus_table = wandb_module.Table(
+            columns=[
+                "Metric",
+                "Unit",
+                "N Artists",
+                "RM-ANOVA F",
+                "df1",
+                "df2",
+                "RM-ANOVA p",
+                "GG Epsilon",
+                "GG df1",
+                "GG df2",
+                "GG-corrected p",
+                "Friedman Chi-square",
+                "Friedman p",
+                f"Significant (GG p < {self.statistical_alpha:g})",
+            ]
+        )
+        for result in omnibus_results:
+            omnibus_table.add_data(
+                METRIC_LABELS[result.metric],
+                "artist",
+                result.count,
+                result.f_statistic,
+                result.df_numerator,
+                result.df_denominator,
+                result.p_value,
+                result.gg_epsilon,
+                result.gg_df_numerator,
+                result.gg_df_denominator,
+                result.gg_p_value,
+                result.friedman_statistic,
+                result.friedman_p_value,
+                bool(result.gg_p_value < self.statistical_alpha),
+            )
+
+        confidence_label = f"{100 * self.statistical_confidence:g}% CI"
+        posthoc_table = wandb_module.Table(
+            columns=[
+                "Metric",
+                "Scenario A",
+                "Scenario B",
+                "Unit",
+                "N Artists",
+                "Mean A",
+                "Mean B",
+                "Mean Delta (B - A)",
+                f"{confidence_label} Low",
+                f"{confidence_label} High",
+                "Paired Mean Permutation p",
+                "Holm p (15 comparisons)",
+                "Significant after Omnibus + Holm",
+            ]
+        )
+        for result in pairwise_results:
+            posthoc_table.add_data(
+                METRIC_LABELS[result.metric],
+                SCENARIO_LABELS[result.scenario_a],
+                SCENARIO_LABELS[result.scenario_b],
+                "artist",
+                result.count,
+                result.mean_a,
+                result.mean_b,
+                result.mean_difference,
+                result.ci_low,
+                result.ci_high,
+                result.permutation_p_value,
+                result.holm_p_value,
+                result.significant,
+            )
+        return {
+            self.statistical_omnibus_log_key: omnibus_table,
+            self.statistical_posthoc_log_key: posthoc_table,
+        }
+
     def _run_and_log(
         self,
         trainer: pl.Trainer,
@@ -1377,8 +1512,11 @@ class EpochControlEvaluationCallback(pl.Callback):
             values = self.evaluation_runner(artifacts)
         summaries = summarize_scenario_metrics(values)
         rows = formatted_table_rows(summaries)
-        if len(rows) != 6 or any(len(row) != 9 for row in rows):
-            raise RuntimeError("control evaluation table must have 6x8 metric cells")
+        expected_width = 1 + len(EVALUATION_METRICS)
+        if len(rows) != len(SCENARIO_NAMES) or any(
+            len(row) != expected_width for row in rows
+        ):
+            raise RuntimeError("control evaluation table has an invalid shape")
 
         import wandb
 
@@ -1397,12 +1535,12 @@ class EpochControlEvaluationCallback(pl.Callback):
         if qualitative_table is not None:
             payload[self.qualitative_log_key] = qualitative_table
         payload.update(self._gt_token_curve_payload(wandb, artifacts))
+        payload.update(self._statistical_table_payload(wandb, values, artifacts))
         for scenario in SCENARIO_NAMES:
             for metric in EVALUATION_METRICS:
                 summary = summaries[scenario][metric]
                 prefix = f"{self.numeric_namespace}/{scenario}/{metric}"
                 payload[f"{prefix}/mean"] = summary.mean
-                payload[f"{prefix}/std"] = summary.std
         for scenario, delta in self._gt_ntc_max_abs_deltas(
             artifacts.gt_token_confidence
         ).items():

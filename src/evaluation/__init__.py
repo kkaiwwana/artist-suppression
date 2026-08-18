@@ -30,6 +30,11 @@ from .metric_runtimes import (
     classifier_target_statistics,
     frechet_distance_from_embeddings,
 )
+from .scenario_statistics import (
+    OmnibusTestResult,
+    PairwiseTestResult,
+    evaluate_scenario_statistics,
+)
 from .suppression_similarity import (
     HFCLAPEncoder,
     MERTEncoder,
@@ -51,6 +56,8 @@ __all__ = [
     "MERTEncoder",
     "METRIC_LABELS",
     "MeanStd",
+    "OmnibusTestResult",
+    "PairwiseTestResult",
     "SAMPLE_TYPES",
     "SCENARIO_LABELS",
     "SCENARIO_NAMES",
@@ -62,6 +69,7 @@ __all__ = [
     "choose_evaluation_artists",
     "compute_similarity_rows",
     "cosine_rows",
+    "evaluate_scenario_statistics",
     "fixed_audio_duration",
     "formatted_table_rows",
     "frechet_distance_from_embeddings",

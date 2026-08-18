@@ -82,8 +82,8 @@ epoch_control_evaluation:
   # false permits Hugging Face/Torch Hub/PaSST checkpoints to download online.
   local_files_only: false
   metric_device: null
-  # Keep one visible W&B panel. Detailed mean/std histories are still logged,
-  # but marked hidden so they remain available through the run API on demand.
+  # Keep one visible W&B result panel. Detailed mean histories are logged but
+  # hidden so they remain queryable through the run API without extra charts.
   log_key: Control Evaluation/Results
   numeric_namespace: Control Evaluation Details
   cache_external_models: true
@@ -107,6 +107,19 @@ epoch_control_evaluation:
   # noise from looking arbitrarily large; exact limits are printed on the plot.
   gt_token_curve_y_padding_fraction: 0.12
   gt_token_curve_min_y_span: 0.02
+  # Statistics use artist (not clip) as the independent unit. The omnibus table
+  # reports repeated-measures ANOVA, Greenhouse-Geisser correction, and a
+  # Friedman robustness check. The post-hoc table contains all 15 paired
+  # scenario comparisons with Holm family-wise correction.
+  statistical_tests_enabled: true
+  statistical_omnibus_log_key: Statistical Analysis/Scenario Omnibus Tests
+  statistical_posthoc_log_key: Statistical Analysis/Paired Post-hoc Tests
+  statistical_num_permutations: 10000
+  statistical_num_bootstrap_resamples: 2000
+  statistical_confidence: 0.95
+  statistical_alpha: 0.05
+  statistical_exact_max_artists: 16
+  statistical_seed: ${exp.seed}
   fail_on_error: false
   generation_kwargs:
     do_sample: true

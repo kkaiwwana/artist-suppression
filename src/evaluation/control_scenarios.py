@@ -84,7 +84,11 @@ class CohortItem:
 
 @dataclass(frozen=True)
 class MeanStd:
-    """Population summary over the evaluation cohort."""
+    """Internal population summary over the evaluation cohort.
+
+    The standard deviation is retained for backwards-compatible programmatic
+    use, but it is no longer displayed or logged by the epoch evaluation.
+    """
 
     mean: float
     std: float
@@ -398,10 +402,18 @@ def format_mean_std(summary: MeanStd, *, precision: int = 4) -> str:
     return f"{summary.mean:.{precision}f} ± {summary.std:.{precision}f}"
 
 
+def format_mean(summary: MeanStd, *, precision: int = 4) -> str:
+    """Format only the cohort mean for the primary result table."""
+
+    if summary.count == 0:
+        return "NaN"
+    return f"{summary.mean:.{precision}f}"
+
+
 def summarize_scenario_metrics(
     values: Mapping[str, Mapping[str, Tensor | Sequence[float]]],
 ) -> dict[str, dict[str, MeanStd]]:
-    """Summarize all six-by-eight cells in stable display order."""
+    """Summarize every scenario/metric cell in stable display order."""
 
     summaries: dict[str, dict[str, MeanStd]] = {}
     for scenario in SCENARIO_NAMES:
@@ -418,13 +430,13 @@ def formatted_table_rows(
     *,
     precision: int | None = None,
 ) -> list[list[str]]:
-    """Create W&B-ready rows: six scenarios by eight ``mean ± std`` cells."""
+    """Create W&B-ready rows containing means without standard deviations."""
 
     return [
         [
             SCENARIO_LABELS[scenario],
             *(
-                format_mean_std(
+                format_mean(
                     summaries[scenario][metric],
                     precision=(
                         int(precision)
@@ -453,6 +465,7 @@ __all__ = [
     "build_control_scenarios",
     "fixed_audio_segment",
     "format_mean_std",
+    "format_mean",
     "formatted_table_rows",
     "select_balanced_cohort",
     "summarize_scenario_metrics",
