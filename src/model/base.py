@@ -16,7 +16,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor, nn
 
-from src.model.utils import WanbSyncLogger
+from src.model.utils import ExperimentSyncLogger
 
 
 def _cfg_get(config: Any, key: str, default: Any = None) -> Any:
@@ -67,7 +67,7 @@ class BaseGenerationModel(pl.LightningModule):
         scheduler_cfg: Optional scheduler configuration with ``name``,
             ``scheduler_params`` and Lightning ``interval``/``frequency``.
         cfg: The full composed Hydra config, retained for downstream use.
-        sync_logger: Optional pre-created :class:`WanbSyncLogger`, useful in
+        sync_logger: Optional pre-created :class:`ExperimentSyncLogger`, useful in
             tests or custom launchers.
         log_backend: Legacy fallback backend used only with an explicitly
             supplied ``sync_logger``. Normal training uses Lightning's logger.
@@ -89,7 +89,7 @@ class BaseGenerationModel(pl.LightningModule):
         optimizer_cfg: Any,
         scheduler_cfg: Optional[Any] = None,
         cfg: Optional[Any] = None,
-        sync_logger: Optional[WanbSyncLogger] = None,
+        sync_logger: Optional[ExperimentSyncLogger] = None,
         log_backend: str = "wandb",
     ) -> None:
         super().__init__()
@@ -356,11 +356,12 @@ class BaseGenerationModel(pl.LightningModule):
         audio_values, prompts = self._generate_test_batch(batch)
         return self._test_output(audio_values, prompts, batch_idx)
 
-    def set_sync_logger(self, logger: Optional[WanbSyncLogger]) -> None:
+    def set_sync_logger(self, logger: Optional[ExperimentSyncLogger]) -> None:
         self._sync_logger = logger
 
     def on_train_start(self) -> None:
-        # WandbLogger is owned by Trainer. The optional legacy sync logger is
+        # The backend Lightning logger is owned by Trainer. The optional legacy
+        # sync logger is
         # only used when a caller explicitly injects one (mainly old tests).
         return
 

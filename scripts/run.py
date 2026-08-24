@@ -1,12 +1,12 @@
-"""Train explicit MusicGen artist controls with Lightning and W&B.
+"""Train MusicGen models with Lightning and a configurable tracker.
 
 Run from the repository root::
 
     D:\\conda\\python.exe scripts/run.py exp.cmt=artist_unlearning
 
-Set ``WANDB_API_KEY`` (preferred) or place the key in the ignored
-``wandb_api_key.txt`` file.  ``RESUME_FROM`` may point to a Lightning
-checkpoint or be set to ``last`` to select the newest local ``last.ckpt``.
+Select W&B or SwanLab with ``LOG_BACKEND``. ``RESUME_FROM`` may point to a
+Lightning checkpoint or be set to ``last`` to select the newest local
+``last.ckpt``; tracker resume IDs are configured independently.
 """
 
 from __future__ import annotations
@@ -27,13 +27,12 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import WandbLogger
 import torch
-import wandb
 
 from src.callback.audio_comparison import ValidationAudioComparisonCallback
 from src.callback.epoch_control_evaluation import EpochControlEvaluationCallback
 from src.callback.git_diff import GitDiffCallback
+from src.experiment_logging import SwanLabLightningLogger
 from src.runner import setup_dataset, setup_model
 
 
@@ -97,7 +96,25 @@ def _resolve_resume_checkpoint(value: str | None, logs_dir: Path) -> str | None:
     return str(checkpoint)
 
 
-def _wandb_logger(config: DictConfig) -> WandbLogger:
+def _tracking_backend(config: DictConfig) -> str:
+    logging_cfg = config.get("logging", {})
+    backend = str(logging_cfg.get("backend", "wandb")).strip().lower()
+    if backend not in {"wandb", "swanlab"}:
+        raise ValueError(
+            "logging.backend must be either 'wandb' or 'swanlab', "
+            f"got {backend!r}"
+        )
+    return backend
+
+
+def _wandb_logger(config: DictConfig) -> Any:
+    try:
+        import wandb
+        from pytorch_lightning.loggers import WandbLogger
+    except ImportError as error:  # pragma: no cover - deployment dependent
+        raise ModuleNotFoundError(
+            "logging.backend=wandb requires the 'wandb' package"
+        ) from error
     _configure_wandb_paths(config)
     wandb_cfg = config.get("wandb", {})
     mode = str(wandb_cfg.get("mode", "online"))
@@ -118,7 +135,9 @@ def _wandb_logger(config: DictConfig) -> WandbLogger:
         entity=None if entity in (None, "null", "") else str(entity),
         name=str(config.exp.uuid),
         id=None if run_id in (None, "null", "") else str(run_id),
-        resume="allow",
+        # A missing ID means a genuinely fresh tracker run. This also avoids
+        # W&B resume-path regressions while still allowing explicit resumption.
+        resume="allow" if run_id not in (None, "null", "") else None,
         save_dir=str(config.exp.save_dir),
         tags=list(config.runner.tags),
         log_model=bool(wandb_cfg.get("log_model", False)),
@@ -128,6 +147,72 @@ def _wandb_logger(config: DictConfig) -> WandbLogger:
         OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
     )
     return logger
+
+
+def _swanlab_logger(config: DictConfig) -> SwanLabLightningLogger:
+    swanlab_cfg = config.get("swanlab", {})
+    mode = str(swanlab_cfg.get("mode", "online")).strip().lower()
+    # The CLI historically calls cloud mode "cloud" while swanlab.init uses
+    # "online". Accept both spellings at the configuration boundary.
+    if mode == "cloud":
+        mode = "online"
+    if mode not in {"online", "offline", "local", "disabled"}:
+        raise ValueError(
+            "swanlab.mode must be online, offline, local, or disabled, "
+            f"got {mode!r}"
+        )
+    run_id = swanlab_cfg.get("run_id")
+    has_run_id = run_id not in (None, "null", "")
+    resume = swanlab_cfg.get("resume", "allow") if has_run_id else None
+    workspace = swanlab_cfg.get("workspace")
+    description = swanlab_cfg.get("description")
+    runtime_dir = Path(config.exp.save_dir) / "swanlab_runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    logger = SwanLabLightningLogger(
+        project=str(config.exp.project),
+        workspace=(
+            None if workspace in (None, "null", "") else str(workspace)
+        ),
+        experiment_name=str(config.exp.uuid),
+        description=(
+            None if description in (None, "null", "") else str(description)
+        ),
+        log_dir=str(runtime_dir),
+        save_dir=str(config.exp.save_dir),
+        mode=mode,
+        tags=list(config.runner.tags),
+        id=None if not has_run_id else str(run_id),
+        resume=resume,
+        public=bool(swanlab_cfg.get("public", False)),
+    )
+    logger.log_hyperparams(
+        OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
+    )
+    return logger
+
+
+def _tracking_logger(config: DictConfig) -> Any:
+    return (
+        _wandb_logger(config)
+        if _tracking_backend(config) == "wandb"
+        else _swanlab_logger(config)
+    )
+
+
+def _finish_tracking(config: DictConfig) -> None:
+    if _tracking_backend(config) == "wandb":
+        import wandb
+
+        wandb.finish()
+        return
+    import swanlab
+
+    try:
+        active = swanlab.get_run()
+    except RuntimeError:
+        active = None
+    if active is not None:
+        swanlab.finish()
 
 
 def _build_callbacks(config: DictConfig) -> list[pl.Callback]:
@@ -208,7 +293,7 @@ def main(config: DictConfig) -> None:
         log.info("Validation dataloaders: %s", list(validation_names))
     _set_scheduler_steps(config, len(datamodule.train_dataloader()))
     model = setup_model(config)
-    logger = _wandb_logger(config)
+    logger = _tracking_logger(config)
     callbacks = _build_callbacks(config)
 
     resume_value = config.exp.get("resume_from")
@@ -232,7 +317,7 @@ def main(config: DictConfig) -> None:
     try:
         trainer.fit(model, datamodule=datamodule, ckpt_path=checkpoint_path)
     finally:
-        wandb.finish()
+        _finish_tracking(config)
 
 
 if __name__ == "__main__":

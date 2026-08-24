@@ -51,10 +51,13 @@ model_cfg:
     # Build an adaptive local reference from decoded artist residuals rather
     # than relying on noisy coarse-genre tags. Similarities are detached and
     # maintained by EMA so conditions cannot game their own neighbour set.
+    # Set peer_mode: none for the no-centering ablation; then peer residuals
+    # are zero and the injected direction is the raw decoded artist residual.
     peer_mode: similarity
-    peer_top_k: 12
+    # Similarity softmax covers every non-self artist; top-k truncation was
+    # removed after its ablation showed no measurable contribution.
     peer_temperature: 0.2
-    peer_similarity_momentum: 0.95
+    peer_similarity_momentum: 0.0
     # Uniform leave-one-out centering during the first updates lets artist
     # residuals acquire signal before their cosine neighbourhood is trusted.
     peer_warmup_steps: 100
@@ -86,17 +89,19 @@ model_cfg:
     artist_contrastive:
       enabled: True
       weight: 1.0
-      margin: 0.1
+      margin: 0.3
     # Make -artist mirror the finite +artist improvement instead of maximizing
     # MusicGen CE without a bound.
     suppression_symmetry_weight: 0.5
     # Clamp the target degradation even if +artist happens to produce a large
     # likelihood gain. A non-positive gain maps to zero in the implementation.
     suppression_symmetry_max_gain: 0.5
-    # On symmetry steps, independently replace half of the per-row negative
-    # controls with a set that always contains the row's target artist. Each
-    # selected artist residual is decoded separately and summed. Sampling is
-    # reproducible from seed, epoch, and batch index.
+    # On symmetry and preservation steps, independently replace half of the
+    # per-row negative controls with a joint set. Symmetry sets always contain
+    # the current sample's target artist. Preservation sets contain only other
+    # artists and explicitly exclude the current target, which remains the
+    # protected reference. Each selected artist residual is decoded separately
+    # and summed. Sampling is reproducible from seed, epoch, and batch index.
     multi_suppression:
       enabled: true
       probability: 0.5
@@ -106,10 +111,18 @@ model_cfg:
     preservation:
       enabled: true
       weight: 1.0
-      margin: 0.3
+      # Full-vocabulary KL(default || suppress-others) on valid MusicGen audio
+      # tokens. Default logits are detached; only the controlled branch trains.
+      temperature: 1.0
+      # Gradient-checkpoint time chunks to avoid retaining full softmax
+      # intermediates alongside MusicGen activations. This does not approximate
+      # the KL or truncate its vocabulary.
+      kl_chunk_size: 32
 
   losses:
     style_bank_l2_weight: 0.0001
+    # Set this to 0.0 together with peer_mode: none for a clean no-centering
+    # ablation that also removes the embedding-centre regularizer.
     concept_center_weight: 0.01
     # Per-branch energy is the SUM of squared relative RMS over all hooked
     # blocks. Penalize only the excess above one network-wide RMS budget, so
@@ -123,4 +136,4 @@ model_cfg:
     guidance_scale: 3.0
     max_new_tokens: 512
 
-log_backend: wandb
+log_backend: ${logging.backend}

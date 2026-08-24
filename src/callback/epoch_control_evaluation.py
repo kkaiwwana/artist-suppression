@@ -13,6 +13,7 @@ import pytorch_lightning as pl
 import torch
 from torch import Tensor
 
+from src.experiment_logging import ExperimentTracker, experiment_tracker
 from src.evaluation._external_output import quiet_external_output
 from src.evaluation.control_scenarios import (
     EVALUATION_METRICS,
@@ -446,21 +447,11 @@ class EpochControlEvaluationCallback(pl.Callback):
         self._runtime_cache: dict[str, Any] = {}
         self._classifier_artist_keys: set[str] | None = None
         self._classifier_vocabulary_resolved = False
-        self._wandb_metrics_defined = False
+        self._backend_metrics_defined = False
 
     @staticmethod
-    def _wandb_experiment(trainer: pl.Trainer) -> Any | None:
-        try:
-            from pytorch_lightning.loggers import WandbLogger
-        except ImportError:  # pragma: no cover
-            return None
-        loggers = getattr(trainer, "loggers", None) or [
-            getattr(trainer, "logger", None)
-        ]
-        for logger in loggers:
-            if isinstance(logger, WandbLogger):
-                return logger.experiment
-        return None
+    def _experiment_tracker(trainer: pl.Trainer) -> ExperimentTracker | None:
+        return experiment_tracker(trainer)
 
     def state_dict(self) -> dict[str, Any]:
         cohort = None
@@ -1155,13 +1146,12 @@ class EpochControlEvaluationCallback(pl.Callback):
         _release_runtime(vggish)
         return values
 
-    def _define_wandb_metrics(self, experiment: Any) -> None:
-        """Keep detailed numeric history queryable without 98 auto-panels."""
+    def _define_backend_metrics(self, tracker: ExperimentTracker) -> None:
+        """Hide detailed W&B panels; SwanLab needs no equivalent setup."""
 
-        if self._wandb_metrics_defined:
+        if self._backend_metrics_defined:
             return
-        define_metric = getattr(experiment, "define_metric", None)
-        if self.hide_detailed_metrics and callable(define_metric):
+        if self.hide_detailed_metrics:
             hidden_patterns = (
                 f"{self.numeric_namespace}/*",
                 # Hide panels created by runs using the previous callback keys.
@@ -1169,12 +1159,12 @@ class EpochControlEvaluationCallback(pl.Callback):
                 "evaluation/control_metrics",
             )
             for pattern in dict.fromkeys(hidden_patterns):
-                define_metric(pattern, hidden=True)
-        self._wandb_metrics_defined = True
+                tracker.define_metric(pattern, hidden=True)
+        self._backend_metrics_defined = True
 
     def _qualitative_comparison_table(
         self,
-        wandb_module: Any,
+        media_module: Any,
         artifacts: EpochControlArtifacts,
     ) -> Any | None:
         """Build one matched row containing the six already-generated audios."""
@@ -1231,7 +1221,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             ]
             control_text = ", ".join(controlled_artists) or "none"
             audio_cells.append(
-                wandb_module.Audio(
+                media_module.Audio(
                     waveform.numpy(),
                     sample_rate=artifacts.sample_rate,
                     caption=(
@@ -1241,7 +1231,7 @@ class EpochControlEvaluationCallback(pl.Callback):
                 )
             )
 
-        table = wandb_module.Table(
+        table = media_module.Table(
             columns=[
                 "epoch",
                 "generation_mode",
@@ -1265,10 +1255,10 @@ class EpochControlEvaluationCallback(pl.Callback):
 
     def _gt_token_curve_payload(
         self,
-        wandb_module: Any,
+        media_module: Any,
         artifacts: EpochControlArtifacts,
     ) -> dict[str, Any]:
-        """Build a raw table and a fixed-color image for W&B's step slider."""
+        """Build a raw table and fixed-color image for the tracker history."""
 
         curves = artifacts.gt_token_confidence_by_position
         positions = artifacts.gt_token_confidence_positions
@@ -1319,7 +1309,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         else:
             y_lower, y_upper = 0.0, 1.0
 
-        table = wandb_module.Table(
+        table = media_module.Table(
             columns=[
                 "Rollout Token Position",
                 *(SCENARIO_LABELS[name] for name in SCENARIO_NAMES),
@@ -1332,12 +1322,12 @@ class EpochControlEvaluationCallback(pl.Callback):
             )
 
         payload: dict[str, Any] = {self.gt_token_curve_table_log_key: table}
-        image_type = getattr(wandb_module, "Image", None)
+        image_type = getattr(media_module, "Image", None)
         if callable(image_type):
             # Construct the figure directly instead of through pyplot so epoch-end
             # evaluation does not accumulate figures in matplotlib's global state.
-            # W&B 0.28 nevertheless expects the pyplot module to be initialized
-            # while it type-checks a matplotlib Figure.
+            # Some media adapters expect pyplot to be initialized while they
+            # type-check a matplotlib Figure.
             from matplotlib import pyplot as _matplotlib_pyplot  # noqa: F401
             from matplotlib.backends.backend_agg import FigureCanvasAgg
             from matplotlib.figure import Figure
@@ -1386,11 +1376,11 @@ class EpochControlEvaluationCallback(pl.Callback):
 
     def _statistical_table_payload(
         self,
-        wandb_module: Any,
+        media_module: Any,
         values: Mapping[str, Mapping[str, Any]],
         artifacts: EpochControlArtifacts,
     ) -> dict[str, Any]:
-        """Build two fixed W&B tables without creating per-test chart panels."""
+        """Build two fixed tables without creating per-test scalar panels."""
 
         if not self.statistical_tests_enabled:
             return {}
@@ -1407,7 +1397,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             seed=self.statistical_seed + int(artifacts.epoch),
         )
 
-        omnibus_table = wandb_module.Table(
+        omnibus_table = media_module.Table(
             columns=[
                 "Metric",
                 "Unit",
@@ -1444,7 +1434,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             )
 
         confidence_label = f"{100 * self.statistical_confidence:g}% CI"
-        posthoc_table = wandb_module.Table(
+        posthoc_table = media_module.Table(
             columns=[
                 "Metric",
                 "Scenario A",
@@ -1488,9 +1478,12 @@ class EpochControlEvaluationCallback(pl.Callback):
         pl_module: pl.LightningModule,
         epoch: int,
     ) -> None:
-        experiment = self._wandb_experiment(trainer)
-        if experiment is None:
-            log.warning("Epoch control evaluation skipped: WandbLogger not found")
+        tracker = self._experiment_tracker(trainer)
+        if tracker is None:
+            log.warning(
+                "Epoch control evaluation skipped: supported experiment "
+                "logger not found"
+            )
             self._logged_epoch = epoch
             return
         if (
@@ -1518,10 +1511,9 @@ class EpochControlEvaluationCallback(pl.Callback):
         ):
             raise RuntimeError("control evaluation table has an invalid shape")
 
-        import wandb
-
-        self._define_wandb_metrics(experiment)
-        table = wandb.Table(
+        media = tracker.media
+        self._define_backend_metrics(tracker)
+        table = media.Table(
             columns=["Scenario", *(METRIC_LABELS[name] for name in EVALUATION_METRICS)]
         )
         for row in rows:
@@ -1531,11 +1523,11 @@ class EpochControlEvaluationCallback(pl.Callback):
             "trainer/global_step": trainer.global_step,
             f"{self.numeric_namespace}/epoch": epoch,
         }
-        qualitative_table = self._qualitative_comparison_table(wandb, artifacts)
+        qualitative_table = self._qualitative_comparison_table(media, artifacts)
         if qualitative_table is not None:
             payload[self.qualitative_log_key] = qualitative_table
-        payload.update(self._gt_token_curve_payload(wandb, artifacts))
-        payload.update(self._statistical_table_payload(wandb, values, artifacts))
+        payload.update(self._gt_token_curve_payload(media, artifacts))
+        payload.update(self._statistical_table_payload(media, values, artifacts))
         for scenario in SCENARIO_NAMES:
             for metric in EVALUATION_METRICS:
                 summary = summaries[scenario][metric]
@@ -1564,7 +1556,7 @@ class EpochControlEvaluationCallback(pl.Callback):
                     payload[f"{prefix}/intervention_energy_max"] = float(
                         energy.max().item()
                     )
-        experiment.log(payload)
+        tracker.log(payload)
         self._logged_epoch = epoch
 
 

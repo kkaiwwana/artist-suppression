@@ -1,9 +1,12 @@
 from pytorch_lightning.utilities import rank_zero_only
 
 
-class WanbSyncLogger:
-    """Synchronized wandb logger. 
-    The raw version's step counting is async, because of pl calls """
+class ExperimentSyncLogger:
+    """Legacy synchronized scalar logger for W&B or SwanLab.
+
+    Normal training uses Lightning's logger. This helper remains for tests and
+    external callers that explicitly inject a synchronous logger.
+    """
     def __init__(self, run, log_every_n_steps=None, step_suffix='_step', epoch_suffix='_epoch', log_backend='wandb'):
         self.run = run
         self.log_every_n_steps = log_every_n_steps
@@ -73,3 +76,10 @@ class WanbSyncLogger:
             else:
                 for k, v in data.items():
                     _dict_list_updater(self.cached_data, k + self._epoch_suffix, v)
+
+
+# Historical misspelling retained for external imports.
+WanbSyncLogger = ExperimentSyncLogger
+
+
+__all__ = ["ExperimentSyncLogger", "WanbSyncLogger"]

@@ -1,4 +1,4 @@
-"""W&B table for default, positive, and explicit suppression probes."""
+"""Tracked audio comparisons for explicit MusicGen control probes."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from typing import Any, Mapping
 import pytorch_lightning as pl
 import torch
 from torch import Tensor
+
+from src.experiment_logging import ExperimentTracker, experiment_tracker
 
 
 log = logging.getLogger(__name__)
@@ -147,16 +149,8 @@ class ValidationAudioComparisonCallback(pl.Callback):
         self._counterfactual_batch: dict[str, Any] | None = None
 
     @staticmethod
-    def _wandb_experiment(trainer: pl.Trainer) -> Any | None:
-        try:
-            from pytorch_lightning.loggers import WandbLogger
-        except ImportError:  # pragma: no cover
-            return None
-        loggers = getattr(trainer, "loggers", None) or [trainer.logger]
-        for logger in loggers:
-            if isinstance(logger, WandbLogger):
-                return logger.experiment
-        return None
+    def _experiment_tracker(trainer: pl.Trainer) -> ExperimentTracker | None:
+        return experiment_tracker(trainer)
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -273,9 +267,12 @@ class ValidationAudioComparisonCallback(pl.Callback):
         pl_module: pl.LightningModule,
         epoch: int,
     ) -> None:
-        experiment = self._wandb_experiment(trainer)
-        if experiment is None:
-            log.warning("Training audio comparison skipped: WandbLogger not found")
+        tracker = self._experiment_tracker(trainer)
+        if tracker is None:
+            log.warning(
+                "Training audio comparison skipped: supported experiment "
+                "logger not found"
+            )
             self._logged_epoch = epoch
             return
         generate = getattr(pl_module, "generate_validation_comparisons", None)
@@ -290,20 +287,18 @@ class ValidationAudioComparisonCallback(pl.Callback):
             return
 
         try:
-            import wandb
-
             if self._source_batch is None:
                 log.warning("Training audio comparison skipped: no fixed probe batch")
                 self._logged_epoch = epoch
                 return
             if not callable(generate):
                 self._log_default_samples(
-                    experiment,
+                    tracker,
                     trainer,
                     pl_module,
                     epoch,
                     generate_default,
-                    wandb,
+                    tracker.media,
                 )
                 return
             if self._counterfactual_batch is None:
@@ -357,7 +352,8 @@ class ValidationAudioComparisonCallback(pl.Callback):
             suppressed_with_other_caption = comparison[
                 "suppressed_with_other_caption"
             ].detach().float().cpu()
-            table = wandb.Table(
+            media = tracker.media
+            table = media.Table(
                 columns=[
                     "epoch",
                     "sample",
@@ -399,22 +395,22 @@ class ValidationAudioComparisonCallback(pl.Callback):
                     ),
                     ", ".join(item_metadata.get("genres", [])),
                     prompts[index],
-                    wandb.Audio(
+                    media.Audio(
                         ground_truth[index, 0, :gt_length].numpy(),
                         sample_rate=sample_rate,
                         caption="ground truth",
                     ),
-                    wandb.Audio(
+                    media.Audio(
                         generated[index, 0, :gen_length].numpy(),
                         sample_rate=sample_rate,
                         caption="default generation (no artist control)",
                     ),
-                    wandb.Audio(
+                    media.Audio(
                         positive[index, 0, :positive_length].numpy(),
                         sample_rate=sample_rate,
                         caption=f"positive artist A: {prompts[index]}",
                     ),
-                    wandb.Audio(
+                    media.Audio(
                         suppressed[index, 0, :suppressed_length].numpy(),
                         sample_rate=sample_rate,
                         caption=f"suppress A with caption A: {prompts[index]}",
@@ -423,17 +419,17 @@ class ValidationAudioComparisonCallback(pl.Callback):
                         "artist_name", other_item_metadata.get("artist_key", "")
                     ),
                     other_prompts[index],
-                    wandb.Audio(
+                    media.Audio(
                         other_ground_truth[index, 0, :other_gt_length].numpy(),
                         sample_rate=sample_rate,
                         caption="ground truth B",
                     ),
-                    wandb.Audio(
+                    media.Audio(
                         other_generated[index, 0, :other_gen_length].numpy(),
                         sample_rate=sample_rate,
                         caption="normal generation B",
                     ),
-                    wandb.Audio(
+                    media.Audio(
                         suppressed_with_other_caption[
                             index, 0, :counterfactual_length
                         ].numpy(),
@@ -444,14 +440,10 @@ class ValidationAudioComparisonCallback(pl.Callback):
                         ),
                     ),
                 )
-            # Lightning's WandbLogger does not pass ``step`` to ``wandb.log``.
-            # It records the optimization step as a regular metric instead,
-            # because W&B's internal history step may advance more than once
-            # per Lightning step (for example for train, LR, and validation
-            # metric payloads). Passing ``trainer.global_step`` as W&B's own
-            # step can therefore be lower than the current history step and
-            # causes W&B to silently reject the whole table, including audio.
-            experiment.log(
+            # Keep the Lightning step as data instead of forcing the tracker's
+            # internal history step. Several logger payloads may be emitted per
+            # optimization step, and backends require monotonic history steps.
+            tracker.log(
                 {
                     self.log_key: table,
                     "trainer/global_step": trainer.global_step,
@@ -471,12 +463,12 @@ class ValidationAudioComparisonCallback(pl.Callback):
 
     def _log_default_samples(
         self,
-        experiment: Any,
+        tracker: ExperimentTracker,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
         epoch: int,
         generate: Any,
-        wandb_module: Any,
+        media_module: Any,
     ) -> None:
         """Log the compact GT/default table used by adapter-only training."""
 
@@ -499,7 +491,7 @@ class ValidationAudioComparisonCallback(pl.Callback):
         ground_truth = result["ground_truth"].detach().float().cpu()
         ground_lengths = result["ground_truth_lengths"].detach().cpu()
         generated = result["generated"].detach().float().cpu()
-        table = wandb_module.Table(
+        table = media_module.Table(
             columns=[
                 "epoch",
                 "sample",
@@ -522,18 +514,18 @@ class ValidationAudioComparisonCallback(pl.Callback):
                 ),
                 ", ".join(item_metadata.get("genres", [])),
                 prompts[index],
-                wandb_module.Audio(
+                media_module.Audio(
                     ground_truth[index, 0, :gt_length].numpy(),
                     sample_rate=sample_rate,
                     caption="ground truth",
                 ),
-                wandb_module.Audio(
+                media_module.Audio(
                     generated[index, 0, :generated_length].numpy(),
                     sample_rate=sample_rate,
                     caption="adapter-only default generation",
                 ),
             )
-        experiment.log(
+        tracker.log(
             {
                 self.log_key: table,
                 "trainer/global_step": trainer.global_step,

@@ -10,11 +10,24 @@ exp:
   seed: 0
   resume_from: ${oc.env:RESUME_FROM,null}
 
+logging:
+  # LOG_BACKEND=wandb (default) or LOG_BACKEND=swanlab.
+  backend: ${oc.env:LOG_BACKEND,wandb}
+
 wandb:
   entity: ${oc.env:WANDB_ENTITY,null}
   mode: ${oc.env:WANDB_MODE,online}
   run_id: ${oc.env:WANDB_RUN_ID,null}
   log_model: false
+
+swanlab:
+  # Authentication is read by SwanLab from SWANLAB_API_KEY or `swanlab login`.
+  workspace: ${oc.env:SWANLAB_WORKSPACE,null}
+  mode: ${oc.env:SWANLAB_MODE,online}
+  run_id: ${oc.env:SWANLAB_RUN_ID,null}
+  resume: allow
+  description: null
+  public: false
 
 hydra:
   run:

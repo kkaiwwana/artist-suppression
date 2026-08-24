@@ -142,9 +142,10 @@ class ConceptLearner(nn.Module):
 
     Similarity is computed in the space that is actually injected into
     MusicGen: decoded artist residuals, centered across artists and averaged
-    over enabled intervention blocks. Top-k softmax neighbours form a local
-    musical reference for each artist. ``"genre"`` and ``"uniform"`` peer
-    modes remain available for controlled ablations.
+    over enabled intervention blocks. A softmax over every other artist forms
+    the musical reference for each artist. ``"genre"`` and ``"uniform"`` peer
+    modes remain available for controlled ablations, while ``"none"`` uses
+    each decoded artist residual directly without peer subtraction.
 
     Multi-concept conditions preserve the single-concept semantics: every
     selected concept is decoded and centered independently, then the residuals
@@ -155,7 +156,7 @@ class ConceptLearner(nn.Module):
     availability state.
     """
 
-    SUPPORTED_PEER_MODES = {"similarity", "genre", "uniform"}
+    SUPPORTED_PEER_MODES = {"similarity", "genre", "uniform", "none"}
 
     def __init__(
         self,
@@ -174,7 +175,6 @@ class ConceptLearner(nn.Module):
         intervention_norm_epsilon: float = 1e-12,
         intervention_blocks: Optional[Sequence[int]] = None,
         peer_mode: str = "similarity",
-        peer_top_k: int = 8,
         peer_temperature: float = 0.2,
         peer_similarity_momentum: float = 0.95,
         peer_warmup_steps: int = 0,
@@ -202,8 +202,6 @@ class ConceptLearner(nn.Module):
                 f"peer_mode must be one of {self.SUPPORTED_PEER_MODES}, "
                 f"got {peer_mode!r}"
             )
-        if peer_top_k <= 0:
-            raise ValueError("peer_top_k must be positive")
         if peer_temperature <= 0:
             raise ValueError("peer_temperature must be positive")
         if not 0.0 <= peer_similarity_momentum < 1.0:
@@ -217,7 +215,6 @@ class ConceptLearner(nn.Module):
         self.num_blocks = int(num_blocks)
         self.concept_name = concept_name
         self.peer_mode = peer_mode
-        self.peer_top_k = int(peer_top_k)
         self.peer_temperature = float(peer_temperature)
         self.peer_similarity_momentum = float(peer_similarity_momentum)
         self.peer_warmup_steps = int(peer_warmup_steps)
@@ -288,7 +285,7 @@ class ConceptLearner(nn.Module):
         return (
             f"concept_name={self.concept_name!r}, "
             f"num_concepts={self.num_concepts}, num_blocks={self.num_blocks}, "
-            f"peer_mode={self.peer_mode!r}, peer_top_k={self.peer_top_k}, "
+            f"peer_mode={self.peer_mode!r}, "
             f"max_block_scale={self.max_block_scale}, "
             f"cap_intervention_rms={self.cap_intervention_rms}"
         )
@@ -454,7 +451,7 @@ class ConceptLearner(nn.Module):
         block_index: int,
         hidden_state: Tensor,
     ) -> Tensor:
-        """Decode only unique top-k peers used by the current batch."""
+        """Decode only peers with nonzero weight in the current batch."""
 
         peer_vector = self._decoded_peer_vectors(
             peer_weights,
@@ -517,7 +514,7 @@ class ConceptLearner(nn.Module):
         return self._normalise(matrix)
 
     def _similarity_peer_matrix(self, weights: Tensor) -> Tensor:
-        """Return a detached top-k softmax neighbour matrix."""
+        """Return a detached all-nonself softmax neighbour matrix."""
 
         if self.num_concepts == 1:
             return weights.new_zeros(1, 1)
@@ -532,14 +529,10 @@ class ConceptLearner(nn.Module):
         similarity = self.peer_similarity_ema.detach().to(weights)
         similarity = similarity.clone()
         similarity.fill_diagonal_(-torch.inf)
-        top_k = min(self.peer_top_k, self.num_concepts - 1)
-        values, indices = torch.topk(similarity, k=top_k, dim=-1)
-        local_weights = torch.softmax(
-            values / self.peer_temperature,
+        peers = torch.softmax(
+            similarity / self.peer_temperature,
             dim=-1,
         )
-        peers = torch.zeros_like(similarity)
-        peers.scatter_(1, indices, local_weights)
         return peers.detach()
 
     def _genre_affinity(self, weights: Tensor) -> Tensor:
@@ -553,6 +546,9 @@ class ConceptLearner(nn.Module):
 
     def _peer_weights(self, weights: Tensor) -> Tensor:
         """Return local peers while excluding explicitly selected concepts."""
+
+        if self.peer_mode == "none":
+            return torch.zeros_like(weights)
 
         selected = weights.gt(0)
         if self.peer_mode == "similarity":

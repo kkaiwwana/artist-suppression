@@ -32,4 +32,4 @@ model_cfg:
     guidance_scale: 3.0
     max_new_tokens: 512
 
-log_backend: wandb
+log_backend: ${logging.backend}

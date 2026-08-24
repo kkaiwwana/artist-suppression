@@ -4,7 +4,7 @@ from pytorch_lightning.utilities import rank_zero_only
 
 
 class Checkpoint:
-    """Have to use customized checkpointing, because of our customized sync wandb logger"""
+    """Legacy checkpoint helper retained for custom synchronized loggers."""
     def __init__(self, monitor: str, topk_models: int, output_path: str, exp_id = 'unknown_exp'):
         self.monitor = monitor
         self.best_models = list()

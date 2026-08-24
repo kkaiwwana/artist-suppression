@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from src.metric.forgetting import GroundTruthNextTokenConfidence
 from src.model.base import BaseGenerationModel, _cfg_get, _instantiate_component
@@ -27,7 +28,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
     * positive: add artist A and improve A's teacher-forced likelihood;
     * negative: subtract A, optionally with sampled artists, and mirror the
       positive likelihood change;
-    * preservation: subtract A while modeling a different artist B.
+    * preservation: preserve the current artist A while subtracting one or more
+      sampled artists whose set explicitly excludes A.
 
     The positive path stops at finite gain and wrong-artist margins. The
     negative path is never trained with unbounded reverse cross entropy. Its
@@ -132,7 +134,6 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 raise ValueError(f"control_training.{name} must be non-negative")
         for name, value in {
             "positive_margin": _cfg_get(self.objective_cfg, "positive_margin", 0.0),
-            "preservation.margin": _cfg_get(preservation, "margin", 0.0),
             "artist_contrastive.margin": _cfg_get(contrastive, "margin", 0.0),
             "losses.intervention_energy_epsilon": _cfg_get(
                 self.loss_cfg, "intervention_energy_epsilon", 1e-6
@@ -150,6 +151,24 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         if budget is not None and float(budget) < 0:
             raise ValueError(
                 "losses.intervention_global_rms_budget must be non-negative"
+            )
+        preservation_temperature = float(
+            _cfg_get(preservation, "temperature", 1.0)
+        )
+        if preservation_temperature <= 0:
+            raise ValueError(
+                "control_training.preservation.temperature must be positive"
+            )
+        preservation_chunk_size = _cfg_get(preservation, "kl_chunk_size", 32)
+        integer_chunk_size = int(preservation_chunk_size)
+        if (
+            isinstance(preservation_chunk_size, bool)
+            or float(preservation_chunk_size) != float(integer_chunk_size)
+            or integer_chunk_size <= 0
+        ):
+            raise ValueError(
+                "control_training.preservation.kl_chunk_size must be a "
+                "positive integer"
             )
 
         multi_suppression = _cfg_get(
@@ -330,6 +349,111 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         mean_cardinality = cardinalities.to(condition.weights).mean()
         return condition, multi_row_rate, mean_cardinality
 
+    def _scheduled_preservation_condition(
+        self,
+        targets: Tensor,
+        batch_idx: int,
+    ) -> Tuple[ConceptCondition, Tensor, Tensor]:
+        """Suppress sampled non-target artists while preserving each row's A.
+
+        Single rows suppress one artist other than the current sample's target.
+        Joint rows suppress 2--5 distinct non-target artists according to the
+        shared ``multi_suppression`` configuration. Unlike symmetry training,
+        the current artist A is never a member of the suppression set.
+
+        Sampling spans the full concept vocabulary rather than the current
+        mini-batch. A fixed seed offset gives preservation an independent,
+        deterministic stream without consuming PyTorch's global RNG state.
+
+        Returns the condition, fraction of joint rows, and mean suppression-set
+        cardinality. With only two concepts, joint rows safely fall back to the
+        only possible single non-target suppression.
+        """
+
+        if targets.ndim != 1:
+            raise ValueError("preservation targets must have shape [batch]")
+        config = _cfg_get(self.objective_cfg, "multi_suppression", {})
+        enabled = bool(_cfg_get(config, "enabled", False))
+        probability = float(_cfg_get(config, "probability", 0.5))
+        min_artists = self._integer_config_value(
+            config,
+            "min_total_artists",
+            2,
+        )
+        max_artists = self._integer_config_value(
+            config,
+            "max_total_artists",
+            5,
+        )
+        base_seed = self._integer_config_value(config, "seed", 0)
+        trainer = getattr(self, "_trainer", None)
+        epoch = int(getattr(trainer, "current_epoch", 0)) if trainer is not None else 0
+        global_rank = (
+            int(getattr(trainer, "global_rank", 0)) if trainer is not None else 0
+        )
+        derived_seed = (
+            base_seed
+            + 1_000_003 * epoch
+            + 97_409 * int(batch_idx)
+            + 15_485_863 * global_rank
+            + 32_452_843
+        ) % ((1 << 63) - 1)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(derived_seed)
+
+        target_ids = targets.detach().to(device="cpu", dtype=torch.long)
+        num_concepts = int(self.concept_learner.num_concepts)
+        if num_concepts < 2:
+            raise ValueError("preservation requires at least two artist concepts")
+        if target_ids.numel() and (
+            (target_ids < 0).any() or (target_ids >= num_concepts).any()
+        ):
+            raise IndexError(f"concept ids must be in [0, {num_concepts})")
+
+        # The current artist is protected, leaving num_concepts - 1 possible
+        # suppressions. With only two artists, this necessarily remains single.
+        maximum_available = num_concepts - 1
+        max_artists = min(max_artists, maximum_available)
+        can_sample_multi = enabled and max_artists >= 2
+        min_artists = min(min_artists, max_artists)
+        batch_size = int(target_ids.numel())
+        multi_rows = (
+            torch.rand(batch_size, generator=generator).lt(probability)
+            if can_sample_multi
+            else torch.zeros(batch_size, dtype=torch.bool)
+        )
+        cardinalities = torch.ones(batch_size, dtype=torch.long)
+        if batch_size and can_sample_multi:
+            sampled = torch.randint(
+                min_artists,
+                max_artists + 1,
+                (batch_size,),
+                generator=generator,
+            )
+            cardinalities = torch.where(multi_rows, sampled, cardinalities)
+
+        weights = torch.zeros(batch_size, num_concepts, dtype=torch.float32)
+        all_concepts = torch.arange(num_concepts)
+        for row_index, (target, cardinality) in enumerate(
+            zip(target_ids.tolist(), cardinalities.tolist())
+        ):
+            candidates = all_concepts[all_concepts.ne(target)]
+            selected = candidates[
+                torch.randperm(candidates.numel(), generator=generator)[
+                    : int(cardinality)
+                ]
+            ]
+            weights[row_index, selected] = 1.0
+            weights[row_index].div_(float(cardinality))
+
+        condition = self.concept_learner.prepare_condition(
+            concept_weights=weights,
+            direction=-1.0,
+        )
+        multi_row_rate = multi_rows.to(condition.weights).mean()
+        mean_cardinality = cardinalities.to(condition.weights).mean()
+        return condition, multi_row_rate, mean_cardinality
+
     def _generator_batch(self, batch: Mapping[str, Any]) -> Dict[str, Any]:
         return {
             key: value
@@ -488,61 +612,6 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             if handles:
                 self.model.remove_hidden_state_hooks(handles)
 
-    @classmethod
-    def _select_rows(cls, value: Any, indices: Tensor, batch_size: int) -> Any:
-        if (
-            isinstance(value, Tensor)
-            and value.ndim > 0
-            and value.shape[0] == batch_size
-        ):
-            return value.index_select(0, indices.to(value.device))
-        if isinstance(value, Mapping):
-            return {
-                key: cls._select_rows(item, indices, batch_size)
-                for key, item in value.items()
-            }
-        index_list = indices.detach().cpu().tolist()
-        if isinstance(value, list) and len(value) == batch_size:
-            return [value[index] for index in index_list]
-        if isinstance(value, tuple) and len(value) == batch_size:
-            return tuple(value[index] for index in index_list)
-        return value
-
-    @classmethod
-    def _select_batch_rows(
-        cls,
-        batch: Mapping[str, Any],
-        indices: Tensor,
-        batch_size: int,
-    ) -> Dict[str, Any]:
-        selected = {
-            key: cls._select_rows(value, indices, batch_size)
-            for key, value in batch.items()
-        }
-        selected.pop("encoder_outputs", None)
-        return selected
-
-    @staticmethod
-    def _cross_artist_pairs(targets: Tensor) -> Tuple[Tensor, Tensor]:
-        """Pair each possible source A with a different donor B in the batch."""
-
-        sources: list[int] = []
-        donors: list[int] = []
-        values = targets.detach().cpu().tolist()
-        for source, source_target in enumerate(values):
-            candidates = [
-                index for index, target in enumerate(values) if target != source_target
-            ]
-            if not candidates:
-                continue
-            sources.append(source)
-            donors.append(candidates[source % len(candidates)])
-        device = targets.device
-        return (
-            torch.tensor(sources, device=device, dtype=torch.long),
-            torch.tensor(donors, device=device, dtype=torch.long),
-        )
-
     @staticmethod
     def _positive_margin_loss(
         positive_losses: Tensor,
@@ -654,53 +723,166 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         return F.smooth_l1_loss(negative_effect, positive_gain)
 
     @staticmethod
-    def _preservation_hinge(
-        controlled_losses: Tensor,
-        reference_losses: Tensor,
-        margin: float,
-    ) -> Tensor:
-        return torch.relu(controlled_losses - reference_losses.detach() - margin).mean()
+    def _preservation_kl_loss(
+        controlled_logits: Tensor,
+        reference_logits: Tensor,
+        labels: Tensor,
+        *,
+        pad_token_id: Optional[int],
+        temperature: float = 1.0,
+        chunk_size: int = 32,
+    ) -> Tuple[Tensor, Tensor]:
+        """Distill the default MusicGen distribution into preservation output.
 
-    def _cross_artist_preservation(
+        Computes ``KL(stopgrad(default) || controlled)`` at every valid
+        codebook/token position. Padding and ``-100`` labels are excluded using
+        the same mask as MusicGen CE. Per-sample reduction first averages valid
+        tokens inside each codebook and then averages valid codebooks, matching
+        the project's sample-level CE weighting.
+
+        Full-vocabulary KL is evaluated in time chunks. During training each
+        chunk is gradient-checkpointed, so the large softmax intermediates are
+        recomputed during backward rather than retained beside MusicGen's
+        activations. The default logits are always detached.
+        """
+
+        if controlled_logits.ndim != 4:
+            raise ValueError(
+                "preservation logits must have shape [B,Q,T,V], got "
+                f"{tuple(controlled_logits.shape)}"
+            )
+        if reference_logits.shape != controlled_logits.shape:
+            raise ValueError(
+                "controlled/default preservation logits must have matching shapes"
+            )
+        if labels.shape != controlled_logits.shape[:-1]:
+            raise ValueError(
+                "preservation labels must match logits [B,Q,T], got "
+                f"{tuple(labels.shape)} for {tuple(controlled_logits.shape)}"
+            )
+        if float(temperature) <= 0:
+            raise ValueError("preservation KL temperature must be positive")
+        if isinstance(chunk_size, bool) or int(chunk_size) <= 0:
+            raise ValueError("preservation KL chunk_size must be a positive integer")
+
+        labels = labels.to(device=controlled_logits.device)
+        valid = labels.ne(-100)
+        if pad_token_id is not None:
+            valid &= labels.ne(int(pad_token_id))
+        reference = reference_logits.detach().to(device=controlled_logits.device)
+        scale = float(temperature)
+
+        def _token_kl(controlled_chunk: Tensor, reference_chunk: Tensor) -> Tensor:
+            controlled_log_probabilities = F.log_softmax(
+                controlled_chunk.float() / scale,
+                dim=-1,
+            )
+            reference_log_probabilities = F.log_softmax(
+                reference_chunk.float() / scale,
+                dim=-1,
+            )
+            return (
+                reference_log_probabilities.exp()
+                * (reference_log_probabilities - controlled_log_probabilities)
+            ).sum(dim=-1) * (scale * scale)
+
+        codebook_kl_sums: list[Tensor] = []
+        sequence_length = controlled_logits.shape[2]
+        for start in range(0, sequence_length, int(chunk_size)):
+            stop = min(start + int(chunk_size), sequence_length)
+            controlled_chunk = controlled_logits[:, :, start:stop]
+            reference_chunk = reference[:, :, start:stop]
+            if torch.is_grad_enabled() and controlled_chunk.requires_grad:
+                token_kl = checkpoint(
+                    _token_kl,
+                    controlled_chunk,
+                    reference_chunk,
+                    use_reentrant=False,
+                )
+            else:
+                token_kl = _token_kl(controlled_chunk, reference_chunk)
+            valid_chunk = valid[:, :, start:stop]
+            codebook_kl_sums.append(
+                token_kl.masked_fill(~valid_chunk, 0.0).sum(dim=-1)
+            )
+
+        if not codebook_kl_sums:
+            per_sample = controlled_logits.new_zeros(
+                controlled_logits.shape[0], dtype=torch.float32
+            )
+            return controlled_logits.sum() * 0.0, per_sample
+        kl_sums = torch.stack(codebook_kl_sums, dim=0).sum(dim=0)
+        valid_token_counts = valid.sum(dim=-1)
+        per_codebook = kl_sums / valid_token_counts.clamp_min(1)
+        valid_codebooks = valid_token_counts.gt(0)
+        per_sample = (
+            per_codebook.sum(dim=-1)
+            / valid_codebooks.sum(dim=-1).clamp_min(1)
+        )
+        return per_sample.mean(), per_sample
+
+    def _other_artist_preservation(
         self,
         batch: Mapping[str, Any],
         batch_idx: int,
         *,
         stage: str,
         targets: Tensor,
-        default_losses: Tensor,
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        default_result: Mapping[str, Any],
+    ) -> Tuple[
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ]:
+        default_losses = default_result["sample_losses"]
         zero = default_losses.sum() * 0.0
         preservation = _cfg_get(self.objective_cfg, "preservation", {})
         if not bool(_cfg_get(preservation, "enabled", True)):
-            return zero, zero, zero, zero, zero
-        source_indices, donor_indices = self._cross_artist_pairs(targets)
-        pair_rate = default_losses.new_tensor(
-            source_indices.numel() / max(1, targets.numel())
-        )
-        if source_indices.numel() == 0:
-            return zero, zero, zero, pair_rate, zero
+            return zero, zero, zero, zero, zero, zero, zero, zero, zero
+        num_concepts = int(self.concept_learner.num_concepts)
+        pair_rate = default_losses.new_tensor(num_concepts >= 2)
+        if num_concepts < 2:
+            return zero, zero, zero, pair_rate, zero, zero, zero, zero, zero
 
-        donor_batch = self._select_batch_rows(
-            batch,
-            donor_indices,
-            targets.shape[0],
+        (
+            condition,
+            multi_preservation_row_rate,
+            preservation_cardinality,
+        ) = self._scheduled_preservation_condition(
+            targets,
+            batch_idx,
         )
-        source_targets = targets.index_select(0, source_indices)
-        condition = self.concept_learner.suppression_condition(source_targets)
         controlled = self._run_generator(
-            donor_batch,
+            batch,
             batch_idx,
             stage=stage,
             condition=condition,
         )
         controlled_losses = controlled["sample_losses"]
-        reference_losses = default_losses.index_select(0, donor_indices).detach()
-        margin = float(_cfg_get(preservation, "margin", 0.0))
-        preservation_loss = self._preservation_hinge(
-            controlled_losses,
-            reference_losses,
-            margin,
+        reference_losses = default_losses.detach()
+        controlled_logits = controlled.get("logits")
+        reference_logits = default_result.get("logits")
+        labels = controlled.get("labels")
+        if not all(
+            isinstance(value, Tensor)
+            for value in (controlled_logits, reference_logits, labels)
+        ):
+            raise TypeError(
+                "preservation KL requires controlled/default logits and labels"
+            )
+        preservation_loss, per_sample_kl = self._preservation_kl_loss(
+            controlled_logits,
+            reference_logits,
+            labels,
+            pad_token_id=getattr(self.model, "pad_token_id", None),
+            temperature=float(_cfg_get(preservation, "temperature", 1.0)),
+            chunk_size=int(_cfg_get(preservation, "kl_chunk_size", 32)),
         )
         return (
             controlled_losses.mean(),
@@ -708,6 +890,10 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             preservation_loss,
             pair_rate,
             controlled["intervention_energy"],
+            multi_preservation_row_rate,
+            preservation_cardinality,
+            per_sample_kl.std(correction=0),
+            per_sample_kl.max(),
         )
 
     def _full_control_objective(
@@ -795,12 +981,16 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             preservation_loss,
             pair_rate,
             cross_energy,
-        ) = self._cross_artist_preservation(
+            multi_preservation_row_rate,
+            preservation_cardinality,
+            preservation_kl_std,
+            preservation_kl_max,
+        ) = self._other_artist_preservation(
             batch,
             batch_idx,
             stage=stage,
             targets=targets,
-            default_losses=default_losses,
+            default_result=default_result,
         )
 
         regularizers = self.concept_learner.compute_losses(
@@ -861,8 +1051,15 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             "suppression_symmetry": symmetry_loss,
             "cross_preservation_raw_monitor": cross_raw,
             "cross_preservation_reference_monitor": cross_reference,
-            "cross_preservation_excess": preservation_loss,
+            "cross_preservation_ce_delta_monitor": (
+                cross_raw.detach() - cross_reference.detach()
+            ),
+            "preservation_kl": preservation_loss,
+            "preservation_kl_std_monitor": preservation_kl_std,
+            "preservation_kl_max_monitor": preservation_kl_max,
             "cross_preservation_pair_rate_monitor": pair_rate,
+            "multi_preservation_row_rate_monitor": multi_preservation_row_rate,
+            "multi_preservation_cardinality_monitor": preservation_cardinality,
             "cross_intervention_energy_monitor": cross_energy,
             "intervention_energy_monitor": intervention_energy,
             "intervention_budget_excess": intervention_budget_excess,
@@ -1111,17 +1308,23 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 preservation_loss,
                 pair_rate,
                 cross_energy,
-            ) = self._cross_artist_preservation(
+                multi_preservation_row_rate,
+                preservation_cardinality,
+                preservation_kl_std,
+                preservation_kl_max,
+            ) = self._other_artist_preservation(
                 batch,
                 batch_idx,
                 stage="train",
                 targets=targets,
-                default_losses=default_losses,
+                default_result=default_result,
             )
             if pair_rate.item() == 0:
-                # A single-artist batch cannot form A/B preservation pairs.
+                # A one-concept vocabulary cannot sample a non-target artist.
                 # Fall back to a useful positive update instead of producing
-                # an optimizer step that only touches small regularizers.
+                # an optimizer step that only touches small regularizers. A
+                # homogeneous batch remains fully eligible when the global
+                # vocabulary contains other artists.
                 positive_result = self._run_generator(
                     batch,
                     batch_idx,
@@ -1163,6 +1366,12 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                         "preservation_fallback_positive_lm_monitor": positive_loss,
                         "preservation_fallback_positive_margin": margin_loss,
                         "cross_preservation_pair_rate_monitor": pair_rate,
+                        "multi_preservation_row_rate_monitor": (
+                            multi_preservation_row_rate
+                        ),
+                        "multi_preservation_cardinality_monitor": (
+                            preservation_cardinality
+                        ),
                         "intervention_energy_monitor": intervention_energy,
                         "intervention_budget_excess": intervention_budget_excess,
                     }
@@ -1189,8 +1398,19 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     {
                         "cross_preservation_raw_monitor": cross_raw,
                         "cross_preservation_reference_monitor": cross_reference,
-                        "cross_preservation_excess": preservation_loss,
+                        "cross_preservation_ce_delta_monitor": (
+                            cross_raw.detach() - cross_reference.detach()
+                        ),
+                        "preservation_kl": preservation_loss,
+                        "preservation_kl_std_monitor": preservation_kl_std,
+                        "preservation_kl_max_monitor": preservation_kl_max,
                         "cross_preservation_pair_rate_monitor": pair_rate,
+                        "multi_preservation_row_rate_monitor": (
+                            multi_preservation_row_rate
+                        ),
+                        "multi_preservation_cardinality_monitor": (
+                            preservation_cardinality
+                        ),
                         "cross_intervention_energy_monitor": cross_energy,
                         "intervention_energy_monitor": cross_energy,
                         "intervention_budget_excess": (
