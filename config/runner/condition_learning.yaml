@@ -87,6 +87,10 @@ epoch_control_evaluation:
   log_key: Control Evaluation/Results
   numeric_namespace: Control Evaluation Details
   cache_external_models: true
+  # Resolve/download classifier, MERT, CLAP, PaSST, and VGGish on rank zero at
+  # on_fit_start, keep them on CPU, and move one runtime at a time for metrics.
+  # This makes missing network/model dependencies fail before epoch 1.
+  preload_external_models: true
   quiet_external_models: true
   hide_detailed_metrics: true
   # Reuse one fixed cohort item and the six generated scenarios; this adds no

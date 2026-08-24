@@ -111,13 +111,9 @@ model_cfg:
     preservation:
       enabled: true
       weight: 1.0
-      # Full-vocabulary KL(default || suppress-others) on valid MusicGen audio
-      # tokens. Default logits are detached; only the controlled branch trains.
-      temperature: 1.0
-      # Gradient-checkpoint time chunks to avoid retaining full softmax
-      # intermediates alongside MusicGen activations. This does not approximate
-      # the KL or truncate its vocabulary.
-      kl_chunk_size: 32
+      # Allow a small teacher-forced CE change while suppressing non-target
+      # artists, and optimize only degradation beyond this finite margin.
+      margin: 0.3
 
   losses:
     style_bank_l2_weight: 0.0001

@@ -294,6 +294,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         log_key: str = "Control Evaluation/Results",
         numeric_namespace: str = "Control Evaluation Details",
         cache_external_models: bool = True,
+        preload_external_models: bool = True,
         quiet_external_models: bool = True,
         hide_detailed_metrics: bool = True,
         qualitative_enabled: bool = True,
@@ -408,6 +409,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         self.log_key = str(log_key)
         self.numeric_namespace = str(numeric_namespace).rstrip("/")
         self.cache_external_models = bool(cache_external_models)
+        self.preload_external_models = bool(preload_external_models)
         self.quiet_external_models = bool(quiet_external_models)
         self.hide_detailed_metrics = bool(hide_detailed_metrics)
         self.qualitative_enabled = bool(qualitative_enabled)
@@ -448,6 +450,7 @@ class EpochControlEvaluationCallback(pl.Callback):
         self._classifier_artist_keys: set[str] | None = None
         self._classifier_vocabulary_resolved = False
         self._backend_metrics_defined = False
+        self._external_models_preloaded = False
 
     @staticmethod
     def _experiment_tracker(trainer: pl.Trainer) -> ExperimentTracker | None:
@@ -481,6 +484,48 @@ class EpochControlEvaluationCallback(pl.Callback):
         self._pending_epoch = state_dict.get("pending_epoch")
         self._logged_epoch = state_dict.get("logged_epoch")
 
+    def on_fit_start(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        """Download and cache external evaluators before the first train epoch."""
+
+        del pl_module
+        if (
+            not self.preload_external_models
+            or self._external_models_preloaded
+            or self.evaluation_runner is not None
+        ):
+            return
+        if not bool(getattr(trainer, "is_global_zero", True)):
+            # Keep other DDP ranks out of the first train collective while rank
+            # zero downloads and initializes the shared external evaluators.
+            self._barrier(trainer, "epoch-control-runtime-preload")
+            return
+        if (
+            "classifier" not in self.runtime_factories
+            and not self.classifier_checkpoint_path
+        ):
+            raise RuntimeError(
+                "classifier_checkpoint_path is required to preload epoch-control "
+                "evaluation; set it in the callback config or disable the callback"
+            )
+
+        log.info(
+            "Preloading epoch-control evaluation runtimes on CPU before training"
+        )
+        factories = self._default_runtime_factories(torch.device("cpu"))
+        for name, factory in factories.items():
+            runtime = self._runtime(name, factory)
+            _release_runtime(runtime)
+        self._external_models_preloaded = True
+        log.info(
+            "Preloaded epoch-control evaluation runtimes: %s",
+            ", ".join(factories),
+        )
+        self._barrier(trainer, "epoch-control-runtime-preload")
+
     def on_validation_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
@@ -506,6 +551,17 @@ class EpochControlEvaluationCallback(pl.Callback):
             self._flush_pending(trainer, pl_module)
         finally:
             self._clear_runtime_cache()
+
+    def on_exception(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        exception: BaseException,
+    ) -> None:
+        """Release any partially preloaded runtimes when fit aborts early."""
+
+        del trainer, pl_module, exception
+        self._clear_runtime_cache()
 
     @staticmethod
     def _barrier(trainer: pl.Trainer, name: str) -> None:
@@ -998,21 +1054,17 @@ class EpochControlEvaluationCallback(pl.Callback):
     def _metric_runtime_device(self, pl_module: pl.LightningModule) -> torch.device:
         return self.metric_device or torch.device(getattr(pl_module, "device", "cpu"))
 
-    def _evaluate_default(
+    def _default_runtime_factories(
         self,
-        artifacts: EpochControlArtifacts,
-        *,
         device: torch.device,
-    ) -> dict[str, dict[str, Tensor]]:
-        values: dict[str, dict[str, Tensor]] = {
-            name: {"gt_token_confidence": artifacts.gt_token_confidence[name]}
-            for name in SCENARIO_NAMES
-        }
+    ) -> dict[str, Callable[[], Any]]:
+        """Construct evaluator factories for preload and the real metric pass."""
 
         def classifier_factory() -> Any:
             if not self.classifier_checkpoint_path:
                 raise RuntimeError(
-                    "classifier_checkpoint_path is required for epoch control evaluation"
+                    "classifier_checkpoint_path is required for epoch control "
+                    "evaluation"
                 )
             from src.evaluation.metric_runtimes import ArtistClassifierRuntime
 
@@ -1024,8 +1076,67 @@ class EpochControlEvaluationCallback(pl.Callback):
                 device=device,
             )
 
+        def mert_factory() -> Any:
+            from src.evaluation.suppression_similarity import MERTEncoder
+
+            return MERTEncoder(
+                self.mert_model_name_or_path,
+                device=device,
+                local_files_only=self.local_files_only,
+            )
+
+        def clap_factory() -> Any:
+            from src.evaluation.suppression_similarity import HFCLAPEncoder
+
+            return HFCLAPEncoder(
+                self.clap_model_name_or_path,
+                device=device,
+                local_files_only=self.local_files_only,
+            )
+
+        def passt_factory() -> Any:
+            from src.metric.quality import PaSSTKLDivergence
+
+            # PaSST otherwise defers its network/download until the first audio
+            # batch, which would defeat the purpose of an early connectivity
+            # check.
+            return PaSSTKLDivergence(
+                lazy_load=False,
+                quiet_backend=self.quiet_external_models,
+            )
+
+        def vggish_factory() -> Any:
+            from src.metric.quality import VGGishAudioEmbedding
+
+            # VGGish uses Torch Hub and is lazy by default. Force model loading
+            # now so a network failure cannot first appear after the last epoch.
+            return VGGishAudioEmbedding(
+                lazy_load=False,
+                quiet_backend=self.quiet_external_models,
+            )
+
+        return {
+            "classifier": classifier_factory,
+            "mert": mert_factory,
+            "clap": clap_factory,
+            "passt": passt_factory,
+            "vggish": vggish_factory,
+        }
+
+    def _evaluate_default(
+        self,
+        artifacts: EpochControlArtifacts,
+        *,
+        device: torch.device,
+    ) -> dict[str, dict[str, Tensor]]:
+        values: dict[str, dict[str, Tensor]] = {
+            name: {"gt_token_confidence": artifacts.gt_token_confidence[name]}
+            for name in SCENARIO_NAMES
+        }
+        factories = self._default_runtime_factories(device)
+
         classifier = _move_runtime(
-            self._runtime("classifier", classifier_factory), device
+            self._runtime("classifier", factories["classifier"]), device
         )
         target_indices = classifier.classifier_indices(artifacts.artist_keys)
         for name in SCENARIO_NAMES:
@@ -1040,16 +1151,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             values[name]["target_artist_rank"] = stats.rank
         _release_runtime(classifier)
 
-        def mert_factory() -> Any:
-            from src.evaluation.suppression_similarity import MERTEncoder
-
-            return MERTEncoder(
-                self.mert_model_name_or_path,
-                device=device,
-                local_files_only=self.local_files_only,
-            )
-
-        mert = _move_runtime(self._runtime("mert", mert_factory), device)
+        mert = _move_runtime(self._runtime("mert", factories["mert"]), device)
         reference_embeddings = mert.encode_audio(
             artifacts.reference_audio,
             sample_rate=artifacts.sample_rate,
@@ -1066,16 +1168,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             )
         _release_runtime(mert)
 
-        def clap_factory() -> Any:
-            from src.evaluation.suppression_similarity import HFCLAPEncoder
-
-            return HFCLAPEncoder(
-                self.clap_model_name_or_path,
-                device=device,
-                local_files_only=self.local_files_only,
-            )
-
-        clap = _move_runtime(self._runtime("clap", clap_factory), device)
+        clap = _move_runtime(self._runtime("clap", factories["clap"]), device)
         for name in SCENARIO_NAMES:
             values[name]["clap_similarity"] = (
                 clap.score(
@@ -1089,12 +1182,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             )
         _release_runtime(clap)
 
-        def passt_factory() -> Any:
-            from src.metric.quality import PaSSTKLDivergence
-
-            return PaSSTKLDivergence(quiet_backend=self.quiet_external_models)
-
-        passt = _move_runtime(self._runtime("passt", passt_factory), device)
+        passt = _move_runtime(self._runtime("passt", factories["passt"]), device)
         for name in SCENARIO_NAMES:
             values[name]["passt_kl"] = _passt_per_sample(
                 passt,
@@ -1105,12 +1193,7 @@ class EpochControlEvaluationCallback(pl.Callback):
             )
         _release_runtime(passt)
 
-        def vggish_factory() -> Any:
-            from src.metric.quality import VGGishAudioEmbedding
-
-            return VGGishAudioEmbedding(quiet_backend=self.quiet_external_models)
-
-        vggish = _move_runtime(self._runtime("vggish", vggish_factory), device)
+        vggish = _move_runtime(self._runtime("vggish", factories["vggish"]), device)
         unique_artists = tuple(dict.fromkeys(artifacts.artist_keys))
         reference_by_artist: dict[str, Tensor] = {}
         for artist_key in unique_artists:
