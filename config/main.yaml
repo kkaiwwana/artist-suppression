@@ -12,7 +12,7 @@ exp:
 
 logging:
   # LOG_BACKEND=wandb (default) or LOG_BACKEND=swanlab.
-  backend: ${oc.env:LOG_BACKEND,wandb}
+  backend: ${oc.env:LOG_BACKEND,swanlab}
 
 wandb:
   entity: ${oc.env:WANDB_ENTITY,null}
