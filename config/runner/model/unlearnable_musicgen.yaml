@@ -23,7 +23,7 @@ model_cfg:
     use_delay_pattern_teacher_forcing: true
     # Stage two may point this at a stage-one BaseGenerationModel .ckpt. Only
     # adapter tensors are loaded; Lightning optimizer/step state is ignored.
-    adapter_checkpoint: ${oc.env:ADAPTER_CHECKPOINT,logs/0807_130348@finetune_musicgen_with_adapter_rank16/ckpts/epoch000-step345.ckpt}
+    adapter_checkpoint: ${oc.env:ADAPTER_CHECKPOINT,logs/0830_141647@gen_ft_128artists/ckpts/epoch000-step2190.ckpt}
     adapter_checkpoint_strict: true
     model_kwargs:
       local_files_only: true
@@ -87,9 +87,9 @@ model_cfg:
     # The correct artist must outperform a deterministic wrong-artist control.
     # The wrong branch is detached, so this cannot learn by damaging it.
     artist_contrastive:
-      enabled: True
+      enabled: true
       weight: 1.0
-      margin: 0.3
+      margin: 0.5
     # Make -artist mirror the finite +artist improvement instead of maximizing
     # MusicGen CE without a bound.
     suppression_symmetry_weight: 0.5
@@ -109,21 +109,25 @@ model_cfg:
       max_total_artists: 5
       seed: ${exp.seed}
     preservation:
-      enabled: true
+      enabled: false
+      # Keep the current global gates in the forward pass, but stop this
+      # branch's gradients from opening or closing them for every artist.
+      # Artist directions, decoder, and depth embeddings remain trainable.
+      freeze_block_scales: true
       weight: 1.0
       # Allow a small teacher-forced CE change while suppressing non-target
       # artists, and optimize only degradation beyond this finite margin.
-      margin: 0.3
+      margin: 0.15
 
   losses:
-    style_bank_l2_weight: 0.0001
+    style_bank_l2_weight: 0.0
     # Set this to 0.0 together with peer_mode: none for a clean no-centering
     # ablation that also removes the embedding-centre regularizer.
-    concept_center_weight: 0.01
+    concept_center_weight: 0.0
     # Per-branch energy is the SUM of squared relative RMS over all hooked
     # blocks. Penalize only the excess above one network-wide RMS budget, so
     # adding more hook blocks can no longer hide intervention through a mean.
-    intervention_energy_weight: 10.0
+    intervention_energy_weight: 0.0
     intervention_global_rms_budget: 0.1
     intervention_energy_epsilon: 1.0e-6
 

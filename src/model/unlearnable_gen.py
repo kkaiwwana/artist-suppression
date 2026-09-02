@@ -430,6 +430,13 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         condition = self.concept_learner.prepare_condition(
             concept_weights=weights,
             direction=-1.0,
+            detach_block_scales=bool(
+                _cfg_get(
+                    _cfg_get(self.objective_cfg, "preservation", {}),
+                    "freeze_block_scales",
+                    True,
+                )
+            ),
         )
         multi_row_rate = multi_rows.to(condition.weights).mean()
         mean_cardinality = cardinalities.to(condition.weights).mean()

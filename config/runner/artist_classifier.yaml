@@ -11,11 +11,11 @@ dataset:
   source_checkpoint_path: ${oc.env:UNLEARNING_CHECKPOINT,null}
   source_config_path: ${oc.env:UNLEARNING_CONFIG,null}
   inherit_source_selection: true
-  generated_audio_dir: ${oc.env:CLASSIFIER_GENERATED_DIR,evaluation_outputs/classifier_audio/0728_091705@condition_learning_with_pretrained_adapter_1e-4lr/epoch002-step1035/continuation_p5_c10}
+  generated_audio_dir: ${oc.env:CLASSIFIER_GENERATED_DIR,null}
   # During training, evaluate real held-out audio and ordinary generations only.
   # Suppression branches remain on disk for separate post-training evaluation.
   generated_validation_sample_types: [default]
-  require_generated_validation: true
+  require_generated_validation: false
   subset_dir: ${oc.env:JAMENDO_SUBSET_DIR,datasets/jamendo_max_caps/subsets/signature_artists0256_songs064_seed0042}
   manifest_path: null
 
@@ -27,9 +27,9 @@ dataset:
   artist_keys: null
   genres: null
   genre_field: coarse_genres
-  max_artists: 64
+  max_artists: 128
   max_songs_per_artist: 64
-  max_clips_per_song: 2
+  max_clips_per_song: 99
   max_samples: null
   val_fraction: 0.05
   test_fraction: 0.05
@@ -59,7 +59,7 @@ model:
       unfreeze_last_n_layers: 0
       use_weighted_layers: true
       selected_layer: -1
-      classifier_hidden_dim: 512
+      classifier_hidden_dim: 1024
       dropout: 0.2
       gradient_checkpointing: false
     validation_names: auto
@@ -86,7 +86,7 @@ validation_audio:
   enabled: false
 
 trainer:
-  max_epochs: 20
+  max_epochs: 5
   log_every_n_steps: 20
   accelerator: auto
   num_nodes: 1

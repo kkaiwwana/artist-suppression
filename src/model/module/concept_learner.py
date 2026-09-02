@@ -53,6 +53,9 @@ class ConceptCondition:
             centered residuals, ``[num_concepts, num_concepts]``.
         has_multi: Whether any prepared row selects more than one concept.
         has_single: Whether any prepared row selects exactly one concept.
+        detach_block_scales: If true, the condition uses the current global
+            block gates as fixed values and cannot update them through its
+            intervention or energy loss.
     """
 
     weights: Tensor
@@ -62,6 +65,7 @@ class ConceptCondition:
     component_peer_weights: Optional[Tensor] = None
     has_multi: bool = False
     has_single: bool = False
+    detach_block_scales: bool = False
 
 
 class ConceptStyleBank(nn.Module):
@@ -576,8 +580,14 @@ class ConceptLearner(nn.Module):
         direction: Union[float, Tensor] = 1.0,
         batch_size: Optional[int] = None,
         device: Optional[torch.device | str] = None,
+        detach_block_scales: bool = False,
     ) -> ConceptCondition:
-        """Prepare an explicit positive, negative, or null condition."""
+        """Prepare an explicit positive, negative, or null condition.
+
+        ``detach_block_scales`` is branch-local: it preserves the current gate
+        values in the forward pass while stopping only their gradient. Other
+        controller parameters remain trainable through the same condition.
+        """
 
         supplied = int(concept_ids is not None) + int(concept_weights is not None)
         if supplied > 1:
@@ -638,6 +648,7 @@ class ConceptLearner(nn.Module):
             component_peer_weights=component_peer_weights,
             has_multi=has_multi,
             has_single=has_single,
+            detach_block_scales=bool(detach_block_scales),
         )
 
     def positive_condition(self, concept_ids: ConceptIds) -> ConceptCondition:
@@ -951,7 +962,14 @@ class ConceptLearner(nn.Module):
             hidden_state,
         )
 
-        layer_scale = self.effective_block_scales[block_index].to(hidden_state)
+        layer_scale = self.effective_block_scales[block_index]
+        if condition.detach_block_scales:
+            # Preservation should shape artist-specific residuals, not close
+            # or open the global gate shared by every control branch. Detach
+            # only this condition's view so optimizer/DDP parameter state is
+            # unchanged and other branches can still train block_scales.
+            layer_scale = layer_scale.detach()
+        layer_scale = layer_scale.to(hidden_state)
         external_scale = self._batch_scale(
             intervention_scale,
             hidden_state,

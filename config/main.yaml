@@ -3,7 +3,7 @@ defaults:
   - runner: ???
 
 exp:
-  project: mus_unlearning_${runner.tags[0]}
+  project: mus_unlearning_${runner.tags[0]}_ICASSP_RUNS
   uuid: ${now:%m%d_%H%M%S}@${exp.cmt}
   cmt: null_comment
   save_dir: ${hydra:runtime.cwd}/logs/${exp.uuid}

@@ -23,7 +23,7 @@ optimizer:
   name: AdamW
   optimizer_params:
     # Only the randomly initialized explicit controller trains by default.
-    lr: 8e-5
+    lr: 6e-5
     weight_decay: 0
 
 
@@ -55,7 +55,7 @@ validation_audio:
 
 
 trainer:
-  max_epochs: 10
+  max_epochs: 2
   log_every_n_steps: 30
 
   accelerator: auto

@@ -24,8 +24,8 @@ optimizer:
   name: AdamW
   optimizer_params:
     # Only the randomly initialized explicit controller trains by default.
-    lr: 0.0001
-    weight_decay: 0
+    lr: 0.00008
+    weight_decay: 1e-5
 
 
 # A fixed learning rate avoids gate-opening transients and AMP scheduler-step
@@ -60,7 +60,7 @@ validation_audio:
 epoch_control_evaluation:
   enabled: true
   every_n_epochs: 30
-  num_artists: 32
+  num_artists: 64
   clips_per_artist: 32
   generation_batch_size: 16
   metric_batch_size: 16
@@ -74,7 +74,7 @@ epoch_control_evaluation:
   continuation_seconds: 10.0
   multi_min_artists: 2
   multi_max_artists: 5
-  classifier_checkpoint_path: ${oc.env:ARTIST_CLASSIFIER_CHECKPOINT,logs/0731_144615@trian_classifier_64cls_continuation/ckpts/last.ckpt}
+  classifier_checkpoint_path: ${oc.env:ARTIST_CLASSIFIER_CHECKPOINT,logs/0830_135251@train_classifier_128_artists/ckpts/last.ckpt}
   classifier_config_path: ${oc.env:ARTIST_CLASSIFIER_CONFIG,null}
   classifier_model_name_or_path: ${oc.env:CLASSIFIER_MERT_MODEL,null}
   mert_model_name_or_path: ${oc.env:MERT_MODEL,m-a-p/MERT-v1-95M}
@@ -149,4 +149,4 @@ trainer:
 
   accumulate_grad_batches: 1
 tags: 
-  - train_gen
+  - learn_condition

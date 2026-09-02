@@ -8,9 +8,9 @@ genre_field: coarse_genres
 # Optional build-time sub-subset controls; the external subset is untouched.
 artist_keys: null
 genres: null
-max_artists: 64
+max_artists: 128
 max_songs_per_artist: 64
-max_clips_per_song: 999
+max_clips_per_song: 99
 max_samples: null
 val_fraction: 0.05
 test_fraction: 0.05
