@@ -43,6 +43,7 @@ class JamendoMaxCapsDataModule(pl.LightningDataModule):
         genre_field: str = "coarse_genres",
         artist_keys: Sequence[str] | None = None,
         genres: Sequence[str] | None = None,
+        selected_coarse_genres: Sequence[str] | None = None,
         max_artists: int | None = None,
         max_songs_per_artist: int | None = None,
         max_clips_per_song: int | None = None,
@@ -91,7 +92,18 @@ class JamendoMaxCapsDataModule(pl.LightningDataModule):
         self.concept_granularity = concept_granularity
         self.genre_field = genre_field
         self.artist_keys = list(artist_keys) if artist_keys is not None else None
-        self.genres = list(genres) if genres is not None else None
+        self.genres = (
+            [genres] if isinstance(genres, str) else list(genres)
+            if genres is not None
+            else None
+        )
+        self.selected_coarse_genres = (
+            [selected_coarse_genres]
+            if isinstance(selected_coarse_genres, str)
+            else list(selected_coarse_genres)
+            if selected_coarse_genres is not None
+            else None
+        )
         self.max_artists = max_artists
         self.max_songs_per_artist = max_songs_per_artist
         self.max_clips_per_song = max_clips_per_song
@@ -162,6 +174,7 @@ class JamendoMaxCapsDataModule(pl.LightningDataModule):
             records,
             artist_keys=self.artist_keys,
             genres=self.genres,
+            selected_coarse_genres=self.selected_coarse_genres,
             genre_field=self.genre_field,
             max_artists=self.max_artists,
             max_songs_per_artist=self.max_songs_per_artist,

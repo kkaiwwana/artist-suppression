@@ -58,6 +58,25 @@ def _record_genres(
     return sorted({str(item).strip() for item in values if str(item).strip()})
 
 
+def _normalise_genre_filter(values: Sequence[str] | str | None) -> set[str]:
+    """Return canonical genre names used only for matching a selection.
+
+    Manifest labels are kept unchanged for vocabulary/metadata purposes, while
+    configuration values are matched case-insensitively and after trimming
+    whitespace.  A ``None`` or empty selection means "all genres".
+    """
+
+    if values is None:
+        return set()
+    if isinstance(values, str):
+        values = (values,)
+    return {
+        str(value).strip().casefold()
+        for value in values
+        if str(value).strip()
+    }
+
+
 def load_token_manifest(path: str | Path) -> list[dict[str, Any]]:
     """Load and minimally validate a converter token manifest."""
 
@@ -105,6 +124,7 @@ def select_records(
     *,
     artist_keys: Sequence[str] | None = None,
     genres: Sequence[str] | None = None,
+    selected_coarse_genres: Sequence[str] | None = None,
     genre_field: str = "coarse_genres",
     max_artists: int | None = None,
     max_songs_per_artist: int | None = None,
@@ -114,9 +134,15 @@ def select_records(
 ) -> list[dict[str, Any]]:
     """Build a deterministic sub-subset from an already selected subset.
 
-    Explicit artist/genre filters are applied first.  Optional artist, song,
-    clip, and total-sample caps then provide inexpensive build-time experiments
-    without regenerating or re-encoding the external subset.
+    Explicit artist/genre filters are applied first.  ``genres`` is the
+    backwards-compatible generic name and keeps its historical "any matching
+    label" behavior.  ``selected_coarse_genres`` is an explicit allow-list for
+    the default coarse-genre field: when it is non-empty, every coarse genre
+    attached to a record must be in the list.  This strict behavior also
+    removes multi-label records that contain an excluded family such as
+    ``experimental``.  Optional artist, song, clip, and total-sample caps then
+    provide inexpensive build-time experiments without regenerating or
+    re-encoding the external subset.
     """
 
     positive_options = {
@@ -129,16 +155,37 @@ def select_records(
         if value is not None and value <= 0:
             raise ValueError(f"{name} must be positive when supplied")
 
+    strict_coarse_genres = selected_coarse_genres is not None
+    if strict_coarse_genres:
+        if genre_field != "coarse_genres":
+            raise ValueError(
+                "selected_coarse_genres requires genre_field='coarse_genres'"
+            )
+        if genres is not None:
+            raise ValueError(
+                "provide only one of genres and selected_coarse_genres"
+            )
+        genres = selected_coarse_genres
+
     allowed_artists = {str(value) for value in artist_keys or ()}
-    allowed_genres = {str(value) for value in genres or ()}
+    allowed_genres = _normalise_genre_filter(genres)
+
+    def _matches_genre_filter(record: Mapping[str, Any]) -> bool:
+        if not allowed_genres:
+            return True
+        record_genres = _normalise_genre_filter(_record_genres(record, genre_field))
+        if strict_coarse_genres:
+            # An explicit non-empty allow-list must not re-admit records with
+            # missing genre metadata (the empty set is a mathematical subset
+            # of every set).
+            return bool(record_genres) and record_genres.issubset(allowed_genres)
+        return bool(allowed_genres.intersection(record_genres))
+
     filtered = [
         dict(record)
         for record in records
         if (not allowed_artists or _artist_key(record) in allowed_artists)
-        and (
-            not allowed_genres
-            or allowed_genres.intersection(_record_genres(record, genre_field))
-        )
+        and _matches_genre_filter(record)
     ]
     if not filtered:
         raise ValueError("record filters removed every sample")

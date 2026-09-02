@@ -34,6 +34,7 @@ SOURCE_SELECTION_KEYS = (
     "manifest_path",
     "artist_keys",
     "genres",
+    "selected_coarse_genres",
     "genre_field",
     "max_artists",
     "max_songs_per_artist",
@@ -200,6 +201,7 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
         local_files_only: bool = False,
         artist_keys: Sequence[str] | None = None,
         genres: Sequence[str] | None = None,
+        selected_coarse_genres: Sequence[str] | None = None,
         genre_field: str = "coarse_genres",
         max_artists: int | None = None,
         max_songs_per_artist: int | None = None,
@@ -258,7 +260,18 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
         self.local_files_only = bool(local_files_only)
         self.selection: dict[str, Any] = {
             "artist_keys": list(artist_keys) if artist_keys is not None else None,
-            "genres": list(genres) if genres is not None else None,
+            "genres": (
+                [genres] if isinstance(genres, str) else list(genres)
+                if genres is not None
+                else None
+            ),
+            "selected_coarse_genres": (
+                [selected_coarse_genres]
+                if isinstance(selected_coarse_genres, str)
+                else list(selected_coarse_genres)
+                if selected_coarse_genres is not None
+                else None
+            ),
             "genre_field": genre_field,
             "max_artists": max_artists,
             "max_songs_per_artist": max_songs_per_artist,
@@ -426,6 +439,7 @@ class ArtistClassificationDataModule(pl.LightningDataModule):
             records,
             artist_keys=self.selection["artist_keys"],
             genres=self.selection["genres"],
+            selected_coarse_genres=self.selection["selected_coarse_genres"],
             genre_field=str(self.selection["genre_field"]),
             max_artists=self.selection["max_artists"],
             max_songs_per_artist=self.selection["max_songs_per_artist"],

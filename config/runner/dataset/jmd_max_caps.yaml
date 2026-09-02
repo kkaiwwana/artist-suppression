@@ -7,6 +7,11 @@ concept_granularity: ${oc.env:CONCEPT_GRANULARITY,artist}
 genre_field: coarse_genres
 # Optional build-time sub-subset controls; the external subset is untouched.
 artist_keys: null
+# Optional strict allow-list for the manifest's ``coarse_genres`` field. Use
+# null (or []) to keep all genres; e.g. [rock, electronic] excludes records
+# carrying any other coarse family, including experimental.
+# The legacy generic ``genres`` key remains supported for older runs.
+selected_coarse_genres: null
 genres: null
 max_artists: 128
 max_songs_per_artist: 64

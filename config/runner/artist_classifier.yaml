@@ -25,6 +25,10 @@ dataset:
   duration_seconds: 10.0
 
   artist_keys: null
+  # Optional strict allow-list for the manifest's coarse_genres field. Use
+  # null (or []) to keep all genres; e.g. [rock, electronic] excludes records
+  # carrying any other coarse family, including experimental.
+  selected_coarse_genres: null
   genres: null
   genre_field: coarse_genres
   max_artists: 128
