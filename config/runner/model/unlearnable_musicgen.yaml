@@ -74,7 +74,7 @@ model_cfg:
     # Only one controlled branch keeps an autograd graph on each optimizer
     # step. This preserves roughly one-forward activation memory while cycling
     # through the complete objective.
-    branch_cycle: [positive, positive, symmetry, positive, preservation]
+    branch_cycle: [positive, positive, symmetry, positive, invariance]
     # The frozen default branch is a reference/monitor. Set this above zero
     # only when train_generator=true and deliberate base adaptation is desired.
     default_weight: 0.0
@@ -84,41 +84,34 @@ model_cfg:
     # Require +artist to improve artist-A likelihood by a finite margin.
     positive_margin: 0.5
     positive_margin_weight: 1.0
-    # The correct artist must outperform a deterministic wrong-artist control.
-    # The wrong branch is detached, so this cannot learn by damaging it.
-    artist_contrastive:
+    # A randomly signed non-target condition should preserve the untouched
+    # token NLL within a finite tolerance. Unlike the former ranking loss, this
+    # updates the wrong condition itself instead of duplicating positive CE.
+    condition_invariance:
       enabled: true
       weight: 1.0
-      margin: 0.5
+      tolerance: 0.05
+      random_sign: true
+      seed: ${exp.seed}
+      # Prevent invariance from closing the global gate. This branch also
+      # monitors, but deliberately does not optimize, intervention energy.
+      freeze_block_scales: true
     # Make -artist mirror the finite +artist improvement instead of maximizing
     # MusicGen CE without a bound.
     suppression_symmetry_weight: 0.5
     # Clamp the target degradation even if +artist happens to produce a large
     # likelihood gain. A non-positive gain maps to zero in the implementation.
     suppression_symmetry_max_gain: 0.5
-    # On symmetry and preservation steps, independently replace half of the
-    # per-row negative controls with a joint set. Symmetry sets always contain
-    # the current sample's target artist. Preservation sets contain only other
-    # artists and explicitly exclude the current target, which remains the
-    # protected reference. Each selected artist residual is decoded separately
-    # and summed. Sampling is reproducible from seed, epoch, and batch index.
+    # On symmetry steps, independently replace half of the per-row target
+    # suppressions with a joint set. Each selected artist residual is decoded
+    # separately and summed. Sampling is reproducible from seed, epoch, and
+    # batch index.
     multi_suppression:
       enabled: true
       probability: 0.5
       min_total_artists: 2
       max_total_artists: 5
       seed: ${exp.seed}
-    preservation:
-      enabled: false
-      # Keep the current global gates in the forward pass, but stop this
-      # branch's gradients from opening or closing them for every artist.
-      # Artist directions, decoder, and depth embeddings remain trainable.
-      freeze_block_scales: true
-      weight: 1.0
-      # Allow a small teacher-forced CE change while suppressing non-target
-      # artists, and optimize only degradation beyond this finite margin.
-      margin: 0.15
-
   losses:
     style_bank_l2_weight: 0.0
     # Set this to 0.0 together with peer_mode: none for a clean no-centering

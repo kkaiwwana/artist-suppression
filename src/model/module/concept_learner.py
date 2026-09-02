@@ -964,10 +964,10 @@ class ConceptLearner(nn.Module):
 
         layer_scale = self.effective_block_scales[block_index]
         if condition.detach_block_scales:
-            # Preservation should shape artist-specific residuals, not close
-            # or open the global gate shared by every control branch. Detach
-            # only this condition's view so optimizer/DDP parameter state is
-            # unchanged and other branches can still train block_scales.
+            # Branch-local selectivity should shape artist-specific residuals,
+            # not close or open the global gate shared by every condition.
+            # Detach only this condition's view so optimizer/DDP parameter
+            # state is unchanged and other branches can train block_scales.
             layer_scale = layer_scale.detach()
         layer_scale = layer_scale.to(hidden_state)
         external_scale = self._batch_scale(

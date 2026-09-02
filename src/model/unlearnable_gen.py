@@ -27,14 +27,15 @@ class UnlearnableGenerationModel(BaseGenerationModel):
     * positive: add artist A and improve A's teacher-forced likelihood;
     * negative: subtract A, optionally with sampled artists, and mirror the
       positive likelihood change;
-    * preservation: preserve the current artist A while subtracting one or more
-      sampled artists whose set explicitly excludes A.
+    * invariance: a randomly signed, non-target artist condition should leave
+      the current sample's token NLL close to the untouched default.
 
-    The positive path stops at finite gain and wrong-artist margins. The
-    negative path is never trained with unbounded reverse cross entropy. Its
-    effect is matched to that finite improvement, while the B path prevents a
-    generic loss of musical ability. A relative residual-energy term and hard
-    block-scale bound limit the actual intervention received by MusicGen.
+    The positive path stops at a finite gain. The negative path is never
+    trained with unbounded reverse cross entropy. Its effect is matched to
+    that finite improvement. Wrong-condition invariance
+    supplies the selectivity signal without maximizing any language-model
+    loss. A relative residual-energy term and hard block-scale bound limit the
+    actual intervention received by MusicGen.
     """
 
     CONTROL_BATCH_KEYS = {
@@ -119,10 +120,12 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 None,
             ),
         }
-        preservation = _cfg_get(self.objective_cfg, "preservation", {})
-        values["preservation.weight"] = _cfg_get(preservation, "weight", 1.0)
-        contrastive = _cfg_get(self.objective_cfg, "artist_contrastive", {})
-        values["artist_contrastive.weight"] = _cfg_get(contrastive, "weight", 0.0)
+        invariance = _cfg_get(self.objective_cfg, "condition_invariance", {})
+        values["condition_invariance.weight"] = _cfg_get(
+            invariance,
+            "weight",
+            1.0,
+        )
         values["losses.intervention_energy_weight"] = _cfg_get(
             self.loss_cfg, "intervention_energy_weight", 0.0
         )
@@ -133,8 +136,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 raise ValueError(f"control_training.{name} must be non-negative")
         for name, value in {
             "positive_margin": _cfg_get(self.objective_cfg, "positive_margin", 0.0),
-            "artist_contrastive.margin": _cfg_get(contrastive, "margin", 0.0),
-            "preservation.margin": _cfg_get(preservation, "margin", 0.0),
+            "condition_invariance.tolerance": _cfg_get(
+                invariance,
+                "tolerance",
+                0.0,
+            ),
             "losses.intervention_energy_epsilon": _cfg_get(
                 self.loss_cfg, "intervention_energy_epsilon", 1e-6
             ),
@@ -195,18 +201,30 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             raise ValueError(
                 "control_training.multi_suppression.seed must be non-negative"
             )
+        invariance_seed = self._integer_config_value(
+            invariance,
+            "seed",
+            0,
+            config_path="condition_invariance",
+        )
+        if invariance_seed < 0:
+            raise ValueError(
+                "control_training.condition_invariance.seed must be non-negative"
+            )
 
     @staticmethod
     def _integer_config_value(
         config: Any,
         name: str,
         default: int,
+        *,
+        config_path: str = "multi_suppression",
     ) -> int:
         value = _cfg_get(config, name, default)
         integer = int(value)
         if isinstance(value, bool) or float(value) != float(integer):
             raise ValueError(
-                f"control_training.multi_suppression.{name} must be an integer"
+                f"control_training.{config_path}.{name} must be an integer"
             )
         return integer
 
@@ -330,45 +348,47 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         mean_cardinality = cardinalities.to(condition.weights).mean()
         return condition, multi_row_rate, mean_cardinality
 
-    def _scheduled_preservation_condition(
+    def _condition_invariance_condition(
         self,
         targets: Tensor,
         batch_idx: int,
-    ) -> Tuple[ConceptCondition, Tensor, Tensor]:
-        """Suppress sampled non-target artists while preserving each row's A.
+        *,
+        vary_by_epoch: bool = True,
+    ) -> Tuple[Optional[ConceptCondition], Tensor, Tensor]:
+        """Prepare one deterministic, randomly signed wrong-artist condition.
 
-        Single rows suppress one artist other than the current sample's target.
-        Joint rows suppress 2--5 distinct non-target artists according to the
-        shared ``multi_suppression`` configuration. Unlike symmetry training,
-        the current artist A is never a member of the suppression set.
+        Every row selects an artist different from its ground-truth target.
+        With ``random_sign`` enabled, independent ``+K`` and ``-K`` controls
+        are sampled without consuming global RNG state. The global block gates
+        are detached by default, so this branch must learn functional
+        selectivity instead of closing a gate shared by every artist.
 
-        Sampling spans the full concept vocabulary rather than the current
-        mini-batch. A fixed seed offset gives preservation an independent,
-        deterministic stream without consuming PyTorch's global RNG state.
-
-        Returns the condition, fraction of joint rows, and mean suppression-set
-        cardinality. With only two concepts, joint rows safely fall back to the
-        only possible single non-target suppression.
+        Returns the condition, valid-pair rate, and positive-sign rate. A
+        one-concept vocabulary or a disabled objective returns ``None``.
         """
 
         if targets.ndim != 1:
-            raise ValueError("preservation targets must have shape [batch]")
-        config = _cfg_get(self.objective_cfg, "multi_suppression", {})
-        enabled = bool(_cfg_get(config, "enabled", False))
-        probability = float(_cfg_get(config, "probability", 0.5))
-        min_artists = self._integer_config_value(
+            raise ValueError("condition-invariance targets must have shape [batch]")
+        config = _cfg_get(self.objective_cfg, "condition_invariance", {})
+        zero = targets.new_zeros((), dtype=torch.float32)
+        if not bool(_cfg_get(config, "enabled", True)):
+            return None, zero, zero
+        wrong_targets = self._wrong_artist_targets(targets, batch_idx)
+        if wrong_targets is None:
+            return None, zero, zero
+
+        base_seed = self._integer_config_value(
             config,
-            "min_total_artists",
-            2,
+            "seed",
+            0,
+            config_path="condition_invariance",
         )
-        max_artists = self._integer_config_value(
-            config,
-            "max_total_artists",
-            5,
-        )
-        base_seed = self._integer_config_value(config, "seed", 0)
         trainer = getattr(self, "_trainer", None)
-        epoch = int(getattr(trainer, "current_epoch", 0)) if trainer is not None else 0
+        epoch = (
+            int(getattr(trainer, "current_epoch", 0))
+            if trainer is not None and vary_by_epoch
+            else 0
+        )
         global_rank = (
             int(getattr(trainer, "global_rank", 0)) if trainer is not None else 0
         )
@@ -377,70 +397,30 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             + 1_000_003 * epoch
             + 97_409 * int(batch_idx)
             + 15_485_863 * global_rank
-            + 32_452_843
+            + 49_979_687
         ) % ((1 << 63) - 1)
         generator = torch.Generator(device="cpu")
         generator.manual_seed(derived_seed)
-
-        target_ids = targets.detach().to(device="cpu", dtype=torch.long)
-        num_concepts = int(self.concept_learner.num_concepts)
-        if num_concepts < 2:
-            raise ValueError("preservation requires at least two artist concepts")
-        if target_ids.numel() and (
-            (target_ids < 0).any() or (target_ids >= num_concepts).any()
-        ):
-            raise IndexError(f"concept ids must be in [0, {num_concepts})")
-
-        # The current artist is protected, leaving num_concepts - 1 possible
-        # suppressions. With only two artists, this necessarily remains single.
-        maximum_available = num_concepts - 1
-        max_artists = min(max_artists, maximum_available)
-        can_sample_multi = enabled and max_artists >= 2
-        min_artists = min(min_artists, max_artists)
-        batch_size = int(target_ids.numel())
-        multi_rows = (
-            torch.rand(batch_size, generator=generator).lt(probability)
-            if can_sample_multi
-            else torch.zeros(batch_size, dtype=torch.bool)
-        )
-        cardinalities = torch.ones(batch_size, dtype=torch.long)
-        if batch_size and can_sample_multi:
-            sampled = torch.randint(
-                min_artists,
-                max_artists + 1,
-                (batch_size,),
-                generator=generator,
+        batch_size = int(targets.numel())
+        if bool(_cfg_get(config, "random_sign", True)):
+            directions = (
+                torch.randint(0, 2, (batch_size,), generator=generator)
+                .to(dtype=torch.float32)
+                .mul_(2.0)
+                .sub_(1.0)
             )
-            cardinalities = torch.where(multi_rows, sampled, cardinalities)
-
-        weights = torch.zeros(batch_size, num_concepts, dtype=torch.float32)
-        all_concepts = torch.arange(num_concepts)
-        for row_index, (target, cardinality) in enumerate(
-            zip(target_ids.tolist(), cardinalities.tolist())
-        ):
-            candidates = all_concepts[all_concepts.ne(target)]
-            selected = candidates[
-                torch.randperm(candidates.numel(), generator=generator)[
-                    : int(cardinality)
-                ]
-            ]
-            weights[row_index, selected] = 1.0
-            weights[row_index].div_(float(cardinality))
-
+        else:
+            directions = torch.ones(batch_size, dtype=torch.float32)
         condition = self.concept_learner.prepare_condition(
-            concept_weights=weights,
-            direction=-1.0,
+            concept_ids=wrong_targets,
+            direction=directions,
             detach_block_scales=bool(
-                _cfg_get(
-                    _cfg_get(self.objective_cfg, "preservation", {}),
-                    "freeze_block_scales",
-                    True,
-                )
+                _cfg_get(config, "freeze_block_scales", True)
             ),
         )
-        multi_row_rate = multi_rows.to(condition.weights).mean()
-        mean_cardinality = cardinalities.to(condition.weights).mean()
-        return condition, multi_row_rate, mean_cardinality
+        pair_rate = condition.weights.new_ones(())
+        positive_sign_rate = directions.gt(0).to(condition.weights).mean()
+        return condition, pair_rate, positive_sign_rate
 
     def _generator_batch(self, batch: Mapping[str, Any]) -> Dict[str, Any]:
         return {
@@ -540,6 +520,8 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         handles = []
         intervention_energies: list[Tensor] = []
         intervention_energy_by_block: Dict[int, Tensor] = {}
+        residual_energies: list[Tensor] = []
+        residual_energy_by_block: Dict[int, Tensor] = {}
 
         def _capture_intervention_energy(
             reference_hidden: Tensor,
@@ -563,6 +545,19 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             relative_energy = delta.float().square().mean() / reference_energy
             intervention_energies.append(relative_energy)
             intervention_energy_by_block[int(context.block_index)] = relative_energy
+            capped_residual = details.get("capped_residual")
+            if not isinstance(capped_residual, Tensor):
+                raise TypeError(
+                    "concept learner details must contain capped_residual"
+                )
+            # This monitor separates residual collapse from a changing global
+            # gate. It is detached because only the actual intervention delta
+            # participates in the configured energy objective.
+            residual_energy = (
+                capped_residual.float().square().mean() / reference_energy
+            ).detach()
+            residual_energies.append(residual_energy)
+            residual_energy_by_block[int(context.block_index)] = residual_energy
 
         if condition is not None:
             handles = self.model.register_concept_learner_hooks(
@@ -595,6 +590,14 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 result["intervention_energy"] = zero
                 result["intervention_energy_max"] = zero
             result["intervention_energy_by_block"] = intervention_energy_by_block
+            if residual_energies:
+                stacked_residuals = torch.stack(residual_energies)
+                result["residual_energy"] = stacked_residuals.sum()
+                result["residual_energy_max"] = stacked_residuals.max()
+            else:
+                result["residual_energy"] = zero.detach()
+                result["residual_energy_max"] = zero.detach()
+            result["residual_energy_by_block"] = residual_energy_by_block
             return result
         finally:
             if handles:
@@ -625,19 +628,50 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         return (targets + offset) % num_concepts
 
     @staticmethod
-    def _artist_contrastive_loss(
-        correct_losses: Tensor,
-        wrong_losses: Tensor,
-        margin: float,
-    ) -> Tensor:
-        """Require the correct artist control to beat a wrong control.
+    def _condition_invariance_token_loss(
+        controlled_token_losses: Tensor,
+        reference_token_losses: Tensor,
+        labels: Tensor,
+        tolerance: float,
+        pad_token_id: Optional[int],
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Keep a wrong condition's valid-token NLL near the default.
 
-        The wrong branch is a detached reference. Consequently this objective
-        can only improve the correct condition; it never adversarially makes a
-        wrong condition noisy or increases its language-model loss.
+        The detached default is a fixed teacher. A squared epsilon-insensitive
+        penalty is symmetric: it corrects both harmful wrong conditions and
+        cross-artist conditions that spuriously improve the current artist.
+        It never rewards moving farther away from the default in either
+        direction.
+
+        Returns loss, signed mean delta, absolute mean delta, and the fraction
+        of valid tokens outside the tolerance band.
         """
 
-        return torch.relu(correct_losses - wrong_losses.detach() + float(margin)).mean()
+        if controlled_token_losses.shape != reference_token_losses.shape:
+            raise ValueError(
+                "controlled and reference token losses must have the same shape"
+            )
+        if labels.shape != controlled_token_losses.shape:
+            raise ValueError("labels and token losses must have the same shape")
+        if float(tolerance) < 0:
+            raise ValueError("condition-invariance tolerance must be non-negative")
+        labels = labels.to(device=controlled_token_losses.device)
+        valid = labels.ne(-100)
+        if pad_token_id is not None:
+            valid &= labels.ne(int(pad_token_id))
+        delta = controlled_token_losses - reference_token_losses.detach()
+        if not valid.any():
+            zero = controlled_token_losses.sum() * 0.0
+            return zero, zero.detach(), zero.detach(), zero.detach()
+        valid_delta = delta[valid]
+        absolute_delta = valid_delta.abs()
+        excess = F.relu(absolute_delta - float(tolerance))
+        return (
+            excess.square().mean(),
+            valid_delta.mean().detach(),
+            absolute_delta.mean().detach(),
+            excess.gt(0).to(dtype=absolute_delta.dtype).mean().detach(),
+        )
 
     def _scale_monitors(self) -> Dict[str, Tensor]:
         effective = self.concept_learner.effective_block_scales
@@ -670,6 +704,24 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             for block_index, block_energy in by_block.items():
                 monitors[
                     f"{prefix}_block_{int(block_index):02d}_relative_rms_monitor"
+                ] = block_energy.clamp_min(0).sqrt()
+        residual_energy = result.get("residual_energy")
+        residual_maximum = result.get("residual_energy_max")
+        if isinstance(residual_energy, Tensor) and isinstance(
+            residual_maximum,
+            Tensor,
+        ):
+            monitors[f"{prefix}_residual_relative_rms_monitor"] = (
+                residual_energy.clamp_min(0).sqrt()
+            )
+            monitors[f"{prefix}_residual_relative_rms_max_monitor"] = (
+                residual_maximum.clamp_min(0).sqrt()
+            )
+        residual_by_block = result.get("residual_energy_by_block", {})
+        if isinstance(residual_by_block, Mapping):
+            for block_index, block_energy in residual_by_block.items():
+                monitors[
+                    f"{prefix}_block_{int(block_index):02d}_residual_relative_rms_monitor"
                 ] = block_energy.clamp_min(0).sqrt()
         return monitors
 
@@ -710,74 +762,85 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         negative_effect = negative_losses - default_losses.detach()
         return F.smooth_l1_loss(negative_effect, positive_gain)
 
-    @staticmethod
-    def _preservation_hinge(
-        controlled_losses: Tensor,
-        reference_losses: Tensor,
-        margin: float,
-    ) -> Tensor:
-        """Penalize only preservation CE degradation beyond a finite margin."""
-
-        return torch.relu(
-            controlled_losses - reference_losses.detach() - float(margin)
-        ).mean()
-
-    def _other_artist_preservation(
+    def _wrong_condition_invariance(
         self,
         batch: Mapping[str, Any],
         batch_idx: int,
         *,
         stage: str,
         targets: Tensor,
-        default_losses: Tensor,
-    ) -> Tuple[
-        Tensor,
-        Tensor,
-        Tensor,
-        Tensor,
-        Tensor,
-        Tensor,
-        Tensor,
-    ]:
-        zero = default_losses.sum() * 0.0
-        preservation = _cfg_get(self.objective_cfg, "preservation", {})
-        if not bool(_cfg_get(preservation, "enabled", True)):
-            return zero, zero, zero, zero, zero, zero, zero
-        num_concepts = int(self.concept_learner.num_concepts)
-        pair_rate = default_losses.new_tensor(num_concepts >= 2)
-        if num_concepts < 2:
-            return zero, zero, zero, pair_rate, zero, zero, zero
+        default_result: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Run one wrong-condition forward and compare token NLL to default."""
 
-        (
-            condition,
-            multi_preservation_row_rate,
-            preservation_cardinality,
-        ) = self._scheduled_preservation_condition(
-            targets,
-            batch_idx,
+        default_losses = default_result.get("sample_losses")
+        default_token_losses = default_result.get("token_losses")
+        labels = default_result.get("labels")
+        if not isinstance(default_losses, Tensor):
+            raise TypeError("default result must contain sample_losses")
+        if not isinstance(default_token_losses, Tensor):
+            raise TypeError("default result must contain token_losses")
+        if not isinstance(labels, Tensor):
+            raise TypeError("default result must contain labels")
+        zero = default_losses.sum() * 0.0
+        condition, pair_rate, positive_sign_rate = (
+            self._condition_invariance_condition(
+                targets,
+                batch_idx,
+                vary_by_epoch=stage == "train",
+            )
         )
+        payload: Dict[str, Any] = {
+            "loss": zero,
+            "controlled_lm": zero.detach(),
+            "reference_lm": default_losses.detach().mean(),
+            "signed_delta": zero.detach(),
+            "absolute_delta": zero.detach(),
+            "excess_rate": zero.detach(),
+            "pair_rate": pair_rate,
+            "positive_sign_rate": positive_sign_rate,
+            "result": None,
+        }
+        if condition is None:
+            return payload
+
         controlled = self._run_generator(
             batch,
             batch_idx,
             stage=stage,
             condition=condition,
         )
-        controlled_losses = controlled["sample_losses"]
-        reference_losses = default_losses.detach()
-        preservation_loss = self._preservation_hinge(
-            controlled_losses,
-            reference_losses,
-            float(_cfg_get(preservation, "margin", 0.0)),
+        controlled_token_losses = controlled.get("token_losses")
+        controlled_losses = controlled.get("sample_losses")
+        if not isinstance(controlled_token_losses, Tensor):
+            raise TypeError("controlled result must contain token_losses")
+        if not isinstance(controlled_losses, Tensor):
+            raise TypeError("controlled result must contain sample_losses")
+        invariance_cfg = _cfg_get(
+            self.objective_cfg,
+            "condition_invariance",
+            {},
         )
-        return (
-            controlled_losses.mean(),
-            reference_losses.mean(),
-            preservation_loss,
-            pair_rate,
-            controlled["intervention_energy"],
-            multi_preservation_row_rate,
-            preservation_cardinality,
+        loss, signed_delta, absolute_delta, excess_rate = (
+            self._condition_invariance_token_loss(
+                controlled_token_losses,
+                default_token_losses,
+                labels,
+                float(_cfg_get(invariance_cfg, "tolerance", 0.0)),
+                getattr(self.model, "pad_token_id", None),
+            )
         )
+        payload.update(
+            {
+                "loss": loss,
+                "controlled_lm": controlled_losses.mean(),
+                "signed_delta": signed_delta,
+                "absolute_delta": absolute_delta,
+                "excess_rate": excess_rate,
+                "result": controlled,
+            }
+        )
+        return payload
 
     def _full_control_objective(
         self,
@@ -831,47 +894,12 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 None,
             ),
         )
-        contrastive_cfg = _cfg_get(
-            self.objective_cfg,
-            "artist_contrastive",
-            {},
-        )
-        wrong_targets = self._wrong_artist_targets(targets, batch_idx)
-        contrastive_pair_rate = default_loss.new_tensor(wrong_targets is not None)
-        wrong_positive_loss = default_loss.new_zeros(())
-        artist_contrastive_loss = default_loss.new_zeros(())
-        if (
-            bool(_cfg_get(contrastive_cfg, "enabled", True))
-            and wrong_targets is not None
-        ):
-            with torch.no_grad():
-                wrong_result = self._run_generator(
-                    batch,
-                    batch_idx,
-                    stage=stage,
-                    condition=self.concept_learner.positive_condition(wrong_targets),
-                )
-            wrong_losses = wrong_result["sample_losses"]
-            wrong_positive_loss = wrong_losses.mean()
-            artist_contrastive_loss = self._artist_contrastive_loss(
-                positive_losses,
-                wrong_losses,
-                float(_cfg_get(contrastive_cfg, "margin", 0.0)),
-            )
-        (
-            cross_raw,
-            cross_reference,
-            preservation_loss,
-            pair_rate,
-            cross_energy,
-            multi_preservation_row_rate,
-            preservation_cardinality,
-        ) = self._other_artist_preservation(
+        invariance = self._wrong_condition_invariance(
             batch,
             batch_idx,
             stage=stage,
             targets=targets,
-            default_losses=default_losses,
+            default_result=default_result,
         )
 
         regularizers = self.concept_learner.compute_losses(
@@ -890,30 +918,30 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         symmetry_weight = float(
             _cfg_get(self.objective_cfg, "suppression_symmetry_weight", 1.0)
         )
-        preservation_cfg = _cfg_get(self.objective_cfg, "preservation", {})
-        preservation_weight = float(_cfg_get(preservation_cfg, "weight", 1.0))
-        contrastive_weight = float(_cfg_get(contrastive_cfg, "weight", 0.0))
+        invariance_cfg = _cfg_get(
+            self.objective_cfg,
+            "condition_invariance",
+            {},
+        )
+        invariance_weight = float(_cfg_get(invariance_cfg, "weight", 1.0))
         energy_weight = float(
             _cfg_get(self.loss_cfg, "intervention_energy_weight", 0.0)
         )
         intervention_energy = (
             positive_result["intervention_energy"]
             + negative_result["intervention_energy"]
-            + cross_energy
         )
         intervention_budget_excess = (
             self._intervention_budget_excess(positive_result["intervention_energy"])
             + self._intervention_budget_excess(negative_result["intervention_energy"])
-            + self._intervention_budget_excess(cross_energy)
         )
 
         total_loss = (
             default_weight * default_loss
             + positive_weight * positive_loss
             + positive_margin_weight * positive_margin_loss
-            + contrastive_weight * artist_contrastive_loss
             + symmetry_weight * symmetry_loss
-            + preservation_weight * preservation_loss
+            + invariance_weight * invariance["loss"]
             + energy_weight * intervention_budget_excess
             + regularizers["loss"]
         )
@@ -926,17 +954,21 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             "positive_gain_monitor": positive_gain,
             "suppression_effect_monitor": suppression_effect,
             "positive_margin": positive_margin_loss,
-            "wrong_positive_lm_reference_monitor": wrong_positive_loss,
-            "artist_contrastive": artist_contrastive_loss,
-            "artist_contrastive_pair_rate_monitor": contrastive_pair_rate,
             "suppression_symmetry": symmetry_loss,
-            "cross_preservation_raw_monitor": cross_raw,
-            "cross_preservation_reference_monitor": cross_reference,
-            "cross_preservation_excess": preservation_loss,
-            "cross_preservation_pair_rate_monitor": pair_rate,
-            "multi_preservation_row_rate_monitor": multi_preservation_row_rate,
-            "multi_preservation_cardinality_monitor": preservation_cardinality,
-            "cross_intervention_energy_monitor": cross_energy,
+            "wrong_condition_lm_monitor": invariance["controlled_lm"],
+            "wrong_condition_reference_lm_monitor": invariance["reference_lm"],
+            "wrong_condition_signed_token_nll_delta_monitor": (
+                invariance["signed_delta"]
+            ),
+            "wrong_condition_abs_token_nll_delta_monitor": (
+                invariance["absolute_delta"]
+            ),
+            "wrong_condition_excess_rate_monitor": invariance["excess_rate"],
+            "wrong_condition_pair_rate_monitor": invariance["pair_rate"],
+            "wrong_condition_positive_sign_rate_monitor": (
+                invariance["positive_sign_rate"]
+            ),
+            "condition_invariance": invariance["loss"],
             "intervention_energy_monitor": intervention_energy,
             "intervention_budget_excess": intervention_budget_excess,
             "concept_auxiliary": regularizers["loss"],
@@ -944,6 +976,16 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         loss_dict.update(self._scale_monitors())
         loss_dict.update(self._energy_monitors(positive_result, prefix="positive"))
         loss_dict.update(self._energy_monitors(negative_result, prefix="negative"))
+        invariance_result = invariance["result"]
+        if isinstance(invariance_result, Mapping):
+            invariance_energy = invariance_result["intervention_energy"]
+            loss_dict["invariance_intervention_energy_monitor"] = invariance_energy
+            loss_dict["invariance_budget_excess_monitor"] = (
+                self._intervention_budget_excess(invariance_energy).detach()
+            )
+            loss_dict.update(
+                self._energy_monitors(invariance_result, prefix="invariance")
+            )
         loss_dict.update(
             {
                 (name if name.startswith("concept_") else f"concept_{name}"): value
@@ -998,15 +1040,15 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             for value in _cfg_get(
                 self.objective_cfg,
                 "branch_cycle",
-                ("positive", "symmetry", "preservation"),
+                ("positive", "symmetry", "invariance"),
             )
         )
         if not cycle or any(
-            value not in {"positive", "symmetry", "preservation"} for value in cycle
+            value not in {"positive", "symmetry", "invariance"} for value in cycle
         ):
             raise ValueError(
                 "control_training.branch_cycle may contain only positive, "
-                "symmetry, and preservation"
+                "symmetry, and invariance"
             )
         branch = cycle[batch_idx % len(cycle)]
         total_loss = regularizers["loss"] + default_weight * default_loss
@@ -1017,7 +1059,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             "default_lm_reference_monitor": default_loss,
             "branch_positive": default_loss.new_tensor(branch == "positive"),
             "branch_symmetry": default_loss.new_tensor(branch == "symmetry"),
-            "branch_preservation": default_loss.new_tensor(branch == "preservation"),
+            "branch_invariance": default_loss.new_tensor(branch == "invariance"),
             "concept_auxiliary": regularizers["loss"],
         }
         loss_dict.update(self._scale_monitors())
@@ -1038,35 +1080,6 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 default_losses,
                 margin,
             )
-            contrastive_cfg = _cfg_get(
-                self.objective_cfg,
-                "artist_contrastive",
-                {},
-            )
-            wrong_targets = self._wrong_artist_targets(targets, batch_idx)
-            contrastive_pair_rate = default_loss.new_tensor(wrong_targets is not None)
-            wrong_positive_loss = default_loss.new_zeros(())
-            artist_contrastive_loss = default_loss.new_zeros(())
-            if (
-                bool(_cfg_get(contrastive_cfg, "enabled", True))
-                and wrong_targets is not None
-            ):
-                with torch.no_grad():
-                    wrong_result = self._run_generator(
-                        batch,
-                        batch_idx,
-                        stage="train",
-                        condition=self.concept_learner.positive_condition(
-                            wrong_targets
-                        ),
-                    )
-                wrong_losses = wrong_result["sample_losses"]
-                wrong_positive_loss = wrong_losses.mean()
-                artist_contrastive_loss = self._artist_contrastive_loss(
-                    positive_losses,
-                    wrong_losses,
-                    float(_cfg_get(contrastive_cfg, "margin", 0.0)),
-                )
             intervention_energy = positive_result["intervention_energy"]
             intervention_budget_excess = self._intervention_budget_excess(
                 intervention_energy
@@ -1083,8 +1096,6 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                     )
                 )
                 * margin_loss
-                + float(_cfg_get(contrastive_cfg, "weight", 0.0))
-                * artist_contrastive_loss
                 + energy_weight * intervention_budget_excess
             )
             loss_dict.update(
@@ -1094,9 +1105,6 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                         default_loss.detach() - positive_loss.detach()
                     ),
                     "positive_margin": margin_loss,
-                    "wrong_positive_lm_reference_monitor": wrong_positive_loss,
-                    "artist_contrastive": artist_contrastive_loss,
-                    "artist_contrastive_pair_rate_monitor": contrastive_pair_rate,
                     "intervention_energy_monitor": intervention_energy,
                     "intervention_budget_excess": intervention_budget_excess,
                 }
@@ -1178,27 +1186,17 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             )
             loss_dict.update(self._energy_monitors(negative_result, prefix="negative"))
         else:
-            (
-                cross_raw,
-                cross_reference,
-                preservation_loss,
-                pair_rate,
-                cross_energy,
-                multi_preservation_row_rate,
-                preservation_cardinality,
-            ) = self._other_artist_preservation(
+            invariance = self._wrong_condition_invariance(
                 batch,
                 batch_idx,
                 stage="train",
                 targets=targets,
-                default_losses=default_losses,
+                default_result=default_result,
             )
-            if pair_rate.item() == 0:
+            if invariance["pair_rate"].item() == 0:
                 # A one-concept vocabulary cannot sample a non-target artist.
                 # Fall back to a useful positive update instead of producing
-                # an optimizer step that only touches small regularizers. A
-                # homogeneous batch remains fully eligible when the global
-                # vocabulary contains other artists.
+                # an optimizer step that only touches small regularizers.
                 positive_result = self._run_generator(
                     batch,
                     batch_idx,
@@ -1237,14 +1235,10 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 )
                 loss_dict.update(
                     {
-                        "preservation_fallback_positive_lm_monitor": positive_loss,
-                        "preservation_fallback_positive_margin": margin_loss,
-                        "cross_preservation_pair_rate_monitor": pair_rate,
-                        "multi_preservation_row_rate_monitor": (
-                            multi_preservation_row_rate
-                        ),
-                        "multi_preservation_cardinality_monitor": (
-                            preservation_cardinality
+                        "invariance_fallback_positive_lm_monitor": positive_loss,
+                        "invariance_fallback_positive_margin": margin_loss,
+                        "wrong_condition_pair_rate_monitor": (
+                            invariance["pair_rate"]
                         ),
                         "intervention_energy_monitor": intervention_energy,
                         "intervention_budget_excess": intervention_budget_excess,
@@ -1253,39 +1247,59 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 loss_dict.update(
                     self._energy_monitors(
                         positive_result,
-                        prefix="preservation_fallback_positive",
+                        prefix="invariance_fallback_positive",
                     )
                 )
             else:
-                preservation_cfg = _cfg_get(
+                invariance_cfg = _cfg_get(
                     self.objective_cfg,
-                    "preservation",
+                    "condition_invariance",
                     {},
                 )
                 total_loss = (
                     total_loss
-                    + float(_cfg_get(preservation_cfg, "weight", 1.0))
-                    * preservation_loss
-                    + energy_weight * self._intervention_budget_excess(cross_energy)
+                    + float(_cfg_get(invariance_cfg, "weight", 1.0))
+                    * invariance["loss"]
                 )
+                invariance_result = invariance["result"]
+                if not isinstance(invariance_result, Mapping):
+                    raise TypeError("enabled invariance must return a result mapping")
+                invariance_energy = invariance_result["intervention_energy"]
                 loss_dict.update(
                     {
-                        "cross_preservation_raw_monitor": cross_raw,
-                        "cross_preservation_reference_monitor": cross_reference,
-                        "cross_preservation_excess": preservation_loss,
-                        "cross_preservation_pair_rate_monitor": pair_rate,
-                        "multi_preservation_row_rate_monitor": (
-                            multi_preservation_row_rate
+                        "wrong_condition_lm_monitor": invariance["controlled_lm"],
+                        "wrong_condition_reference_lm_monitor": (
+                            invariance["reference_lm"]
                         ),
-                        "multi_preservation_cardinality_monitor": (
-                            preservation_cardinality
+                        "wrong_condition_signed_token_nll_delta_monitor": (
+                            invariance["signed_delta"]
                         ),
-                        "cross_intervention_energy_monitor": cross_energy,
-                        "intervention_energy_monitor": cross_energy,
-                        "intervention_budget_excess": (
-                            self._intervention_budget_excess(cross_energy)
+                        "wrong_condition_abs_token_nll_delta_monitor": (
+                            invariance["absolute_delta"]
+                        ),
+                        "wrong_condition_excess_rate_monitor": (
+                            invariance["excess_rate"]
+                        ),
+                        "wrong_condition_pair_rate_monitor": (
+                            invariance["pair_rate"]
+                        ),
+                        "wrong_condition_positive_sign_rate_monitor": (
+                            invariance["positive_sign_rate"]
+                        ),
+                        "condition_invariance": invariance["loss"],
+                        "invariance_intervention_energy_monitor": invariance_energy,
+                        # Deliberately monitor but do not optimize energy on
+                        # this branch: otherwise residual shrinkage is again
+                        # the easiest route to apparent invariance.
+                        "invariance_budget_excess_monitor": (
+                            self._intervention_budget_excess(
+                                invariance_energy
+                            ).detach()
                         ),
                     }
+                )
+                loss_dict.update(
+                    self._energy_monitors(invariance_result, prefix="invariance")
                 )
 
         loss_dict.update(
