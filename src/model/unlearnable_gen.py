@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import nullcontext
+import math
 from typing import Any, Dict, Optional, Tuple
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -25,15 +27,15 @@ class UnlearnableGenerationModel(BaseGenerationModel):
 
     * default: no control, used as the stable reference;
     * positive: add artist A and improve A's teacher-forced likelihood;
-    * negative: subtract A, optionally with sampled artists, and mirror the
-      positive likelihood change;
+    * negative: subtract A, optionally with sampled artists, and increase A's
+      teacher-forced cross entropy by a fixed margin above the default;
     * preservation: preserve the current artist A while subtracting one or more
       sampled artists whose set explicitly excludes A.
 
     The positive path stops at finite gain and wrong-artist margins. The
-    negative path is never trained with unbounded reverse cross entropy. Its
-    effect is matched to that finite improvement, while the B path prevents a
-    generic loss of musical ability. A relative residual-energy term and hard
+    negative path uses the sign-reversed hinge and does not depend on the
+    positive path's achieved gain. Neither hinge rewards further change once
+    its margin is met. A relative residual-energy term and hard
     block-scale bound limit the actual intervention received by MusicGen.
     """
 
@@ -104,19 +106,40 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             self.concept_learner.refresh_peer_similarity()
 
     def _validate_objective_config(self) -> None:
+        negative_margin, negative_weight = self._negative_objective_settings()
+        for name, value in {
+            "negative_margin": negative_margin,
+            "negative_margin_weight": negative_weight,
+        }.items():
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"control_training.{name} must be finite and non-negative")
+        if _cfg_get(self.objective_cfg, "suppression_symmetry_weight", None) is not None:
+            warnings.warn(
+                "suppression_symmetry_weight is deprecated; use negative_margin_weight. "
+                "The negative branch now uses a fixed-margin hinge, not gain matching. "
+                "An explicit negative_margin_weight takes precedence.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if _cfg_get(self.objective_cfg, "suppression_symmetry_max_gain", None) is not None:
+            warnings.warn(
+                "suppression_symmetry_max_gain is ignored: negative_margin now sets "
+                "the required CE increase (defaults to positive_margin).",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if "symmetry" in _cfg_get(self.objective_cfg, "branch_cycle", ()):
+            warnings.warn(
+                "branch_cycle entry 'symmetry' is a deprecated alias for 'negative'; "
+                "it now trains the negative-margin hinge.",
+                FutureWarning,
+                stacklevel=2,
+            )
         values = {
             "default_weight": _cfg_get(self.objective_cfg, "default_weight", 0.0),
             "positive_weight": _cfg_get(self.objective_cfg, "positive_weight", 0.0),
             "positive_margin_weight": _cfg_get(
                 self.objective_cfg, "positive_margin_weight", 0.0
-            ),
-            "suppression_symmetry_weight": _cfg_get(
-                self.objective_cfg, "suppression_symmetry_weight", 1.0
-            ),
-            "suppression_symmetry_max_gain": _cfg_get(
-                self.objective_cfg,
-                "suppression_symmetry_max_gain",
-                None,
             ),
         }
         preservation = _cfg_get(self.objective_cfg, "preservation", {})
@@ -241,7 +264,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
     ) -> Tuple[ConceptCondition, Tensor, Tensor]:
         """Build deterministic row-wise single or joint suppression controls.
 
-        Joint controls are used only by the scheduled symmetry branch. Each
+        Joint controls are used only by the scheduled negative branch. Each
         selected row contains its ground-truth artist plus distinct uniformly
         sampled artists. The normalized multi-hot tensor represents set
         membership; ConceptLearner separately decodes and sums the selected
@@ -339,7 +362,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
 
         Single rows suppress one artist other than the current sample's target.
         Joint rows suppress 2--5 distinct non-target artists according to the
-        shared ``multi_suppression`` configuration. Unlike symmetry training,
+        shared ``multi_suppression`` configuration. Unlike negative training,
         the current artist A is never a member of the suppression set.
 
         Sampling spans the full concept vocabulary rather than the current
@@ -693,22 +716,35 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         global_relative_rms = energy.clamp_min(epsilon).sqrt()
         return F.relu(global_relative_rms - float(budget)).square()
 
-    @staticmethod
-    def _suppression_symmetry_loss(
-        default_losses: Tensor,
-        positive_losses: Tensor,
-        negative_losses: Tensor,
-        max_gain: Optional[float] = None,
-    ) -> Tensor:
-        """Match negative degradation to the finite positive improvement."""
+    def _negative_objective_settings(self) -> Tuple[float, float]:
+        """Resolve canonical settings, accepting the old weight for saved configs."""
 
-        positive_gain = (default_losses.detach() - positive_losses.detach()).clamp_min(
-            0.0
+        margin = _cfg_get(
+            self.objective_cfg,
+            "negative_margin",
+            _cfg_get(self.objective_cfg, "positive_margin", 0.0),
         )
-        if max_gain is not None:
-            positive_gain = positive_gain.clamp_max(float(max_gain))
-        negative_effect = negative_losses - default_losses.detach()
-        return F.smooth_l1_loss(negative_effect, positive_gain)
+        weight = _cfg_get(
+            self.objective_cfg,
+            "negative_margin_weight",
+            _cfg_get(self.objective_cfg, "suppression_symmetry_weight", 1.0),
+        )
+        return float(margin), float(weight)
+
+    @staticmethod
+    def _negative_margin_loss(
+        negative_losses: Tensor,
+        default_losses: Tensor,
+        margin: float,
+    ) -> Tensor:
+        """Increase CE above the detached default, stopping at a fixed margin.
+
+        This is the sign-reversed positive hinge, not unbounded CE ascent.
+        In particular, margin=0 still has a dead zone and ReLU's zero gradient
+        at equality; an identity intervention need not start learning from it.
+        """
+
+        return torch.relu(default_losses.detach() - negative_losses + margin).mean()
 
     @staticmethod
     def _preservation_hinge(
@@ -821,15 +857,11 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             default_losses,
             positive_margin,
         )
-        symmetry_loss = self._suppression_symmetry_loss(
-            default_losses,
-            positive_losses,
+        negative_margin, negative_margin_weight = self._negative_objective_settings()
+        negative_margin_loss = self._negative_margin_loss(
             negative_losses,
-            _cfg_get(
-                self.objective_cfg,
-                "suppression_symmetry_max_gain",
-                None,
-            ),
+            default_losses,
+            negative_margin,
         )
         contrastive_cfg = _cfg_get(
             self.objective_cfg,
@@ -887,9 +919,6 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         positive_margin_weight = float(
             _cfg_get(self.objective_cfg, "positive_margin_weight", 0.0)
         )
-        symmetry_weight = float(
-            _cfg_get(self.objective_cfg, "suppression_symmetry_weight", 1.0)
-        )
         preservation_cfg = _cfg_get(self.objective_cfg, "preservation", {})
         preservation_weight = float(_cfg_get(preservation_cfg, "weight", 1.0))
         contrastive_weight = float(_cfg_get(contrastive_cfg, "weight", 0.0))
@@ -912,7 +941,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             + positive_weight * positive_loss
             + positive_margin_weight * positive_margin_loss
             + contrastive_weight * artist_contrastive_loss
-            + symmetry_weight * symmetry_loss
+            + negative_margin_weight * negative_margin_loss
             + preservation_weight * preservation_loss
             + energy_weight * intervention_budget_excess
             + regularizers["loss"]
@@ -929,7 +958,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             "wrong_positive_lm_reference_monitor": wrong_positive_loss,
             "artist_contrastive": artist_contrastive_loss,
             "artist_contrastive_pair_rate_monitor": contrastive_pair_rate,
-            "suppression_symmetry": symmetry_loss,
+            "negative_margin": negative_margin_loss,
             "cross_preservation_raw_monitor": cross_raw,
             "cross_preservation_reference_monitor": cross_reference,
             "cross_preservation_excess": preservation_loss,
@@ -994,19 +1023,19 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             ),
         )
         cycle = tuple(
-            str(value)
+            ("negative" if str(value) == "symmetry" else str(value))
             for value in _cfg_get(
                 self.objective_cfg,
                 "branch_cycle",
-                ("positive", "symmetry", "preservation"),
+                ("positive", "negative", "preservation"),
             )
         )
         if not cycle or any(
-            value not in {"positive", "symmetry", "preservation"} for value in cycle
+            value not in {"positive", "negative", "preservation"} for value in cycle
         ):
             raise ValueError(
                 "control_training.branch_cycle may contain only positive, "
-                "symmetry, and preservation"
+                "negative, and preservation ('symmetry' is a legacy alias)"
             )
         branch = cycle[batch_idx % len(cycle)]
         total_loss = regularizers["loss"] + default_weight * default_loss
@@ -1016,7 +1045,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
         loss_dict: Dict[str, Tensor] = {
             "default_lm_reference_monitor": default_loss,
             "branch_positive": default_loss.new_tensor(branch == "positive"),
-            "branch_symmetry": default_loss.new_tensor(branch == "symmetry"),
+            "branch_negative": default_loss.new_tensor(branch == "negative"),
             "branch_preservation": default_loss.new_tensor(branch == "preservation"),
             "concept_auxiliary": regularizers["loss"],
         }
@@ -1102,15 +1131,7 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 }
             )
             loss_dict.update(self._energy_monitors(positive_result, prefix="positive"))
-        elif branch == "symmetry":
-            with torch.no_grad():
-                positive_result = self._run_generator(
-                    batch,
-                    batch_idx,
-                    stage="train",
-                    condition=self.concept_learner.positive_condition(targets),
-                )
-            self._update_gt_ntc("enhance_target", positive_result)
+        elif branch == "negative":
             (
                 negative_condition,
                 multi_suppression_row_rate,
@@ -1133,18 +1154,13 @@ class UnlearnableGenerationModel(BaseGenerationModel):
                 negative_result,
                 row_mask=suppression_cardinalities.gt(1),
             )
-            positive_loss = positive_result["sample_losses"].mean()
             negative_losses = negative_result["sample_losses"]
             negative_loss = negative_losses.mean()
-            symmetry_loss = self._suppression_symmetry_loss(
-                default_losses,
-                positive_result["sample_losses"],
+            negative_margin, negative_margin_weight = self._negative_objective_settings()
+            negative_margin_loss = self._negative_margin_loss(
                 negative_losses,
-                _cfg_get(
-                    self.objective_cfg,
-                    "suppression_symmetry_max_gain",
-                    None,
-                ),
+                default_losses,
+                negative_margin,
             )
             intervention_energy = negative_result["intervention_energy"]
             intervention_budget_excess = self._intervention_budget_excess(
@@ -1152,26 +1168,18 @@ class UnlearnableGenerationModel(BaseGenerationModel):
             )
             total_loss = (
                 total_loss
-                + float(
-                    _cfg_get(
-                        self.objective_cfg,
-                        "suppression_symmetry_weight",
-                        1.0,
-                    )
-                )
-                * symmetry_loss
+                + negative_margin_weight * negative_margin_loss
                 + energy_weight * intervention_budget_excess
             )
             loss_dict.update(
                 {
-                    "positive_lm_reference_monitor": positive_loss,
                     "negative_lm_monitor": negative_loss,
                     "suppression_effect_monitor": (
                         negative_loss.detach() - default_loss.detach()
                     ),
                     "multi_suppression_row_rate_monitor": (multi_suppression_row_rate),
                     "multi_suppression_cardinality_monitor": (suppression_cardinality),
-                    "suppression_symmetry": symmetry_loss,
+                    "negative_margin": negative_margin_loss,
                     "intervention_energy_monitor": intervention_energy,
                     "intervention_budget_excess": intervention_budget_excess,
                 }

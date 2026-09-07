@@ -74,7 +74,7 @@ model_cfg:
     # Only one controlled branch keeps an autograd graph on each optimizer
     # step. This preserves roughly one-forward activation memory while cycling
     # through the complete objective.
-    branch_cycle: [positive, positive, symmetry, positive, preservation]
+    branch_cycle: [positive, positive, negative, positive, preservation]
     # The frozen default branch is a reference/monitor. Set this above zero
     # only when train_generator=true and deliberate base adaptation is desired.
     default_weight: 0.0
@@ -90,14 +90,14 @@ model_cfg:
       enabled: true
       weight: 1.0
       margin: 0.5
-    # Make -artist mirror the finite +artist improvement instead of maximizing
-    # MusicGen CE without a bound.
-    suppression_symmetry_weight: 0.5
-    # Clamp the target degradation even if +artist happens to produce a large
-    # likelihood gain. A non-positive gain maps to zero in the implementation.
-    suppression_symmetry_max_gain: 0.5
-    # On symmetry and preservation steps, independently replace half of the
-    # per-row negative controls with a joint set. Symmetry sets always contain
+    # Pure negative hinge: relu(CE(default).detach() - CE(-artist) + margin).
+    # It is independent of +artist's achieved gain and does not pull excessive
+    # suppression back down. Default to the same margin as the positive hinge.
+    # A zero margin still clips the loss; it is NOT unbounded reverse CE.
+    negative_margin: ${.positive_margin}
+    negative_margin_weight: 0.5
+    # On negative and preservation steps, independently replace half of the
+    # per-row negative controls with a joint set. Negative sets always contain
     # the current sample's target artist. Preservation sets contain only other
     # artists and explicitly exclude the current target, which remains the
     # protected reference. Each selected artist residual is decoded separately
