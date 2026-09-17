@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "excluded_sample_ids": [],
+  "items": [
+    {
+      "sample_id": "example-single-01",
+      "sample_index": 1,
+      "group": "single",
+      "source_artist_name": "Artist name",
+      "source_title": "Track title",
+      "caption": "A short description of the listening example.",
+      "start_ms": 0,
+      "end_ms": 30000,
+      "audio": {
+        "prompt": "audio/example-single-01/prompt.wav",
+        "reference": "audio/example-single-01/reference.wav",
+        "no_control": "audio/example-single-01/no_control.wav",
+        "enhance_target": "audio/example-single-01/enhance.wav",
+        "suppress_single_target": "audio/example-single-01/suppress.wav",
+        "suppress_single_others": "audio/example-single-01/suppress_others.wav"
+      }
+    }
+  ]
+}

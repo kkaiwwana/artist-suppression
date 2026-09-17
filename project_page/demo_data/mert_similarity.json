@@ -1,0 +1,813 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-09-01T10:50:48.985018+00:00",
+  "metric": {
+    "id": "mert_similarity_to_reference",
+    "label": "MERT similarity to GT",
+    "model": "m-a-p/MERT-v1-95M",
+    "layer": -1,
+    "pooling": "attention-mask-aware temporal mean",
+    "comparison": "cosine similarity",
+    "reference_variant": "reference"
+  },
+  "items": {
+    "jmdmc__a_id_357163__t_1465941__s_000780000__e_000810000__c_13ba13b550ef3aa5": {
+      "sample_index": 193,
+      "group": "single",
+      "source_title": "Reflections In The Morning #1",
+      "fingerprints": {
+        "prompt": "sha256:8859408385607354d917b06785a7e4cb4282b74f5f35460eb4b678c0de583830",
+        "reference": "sha256:db6ce7d8082ceb5517a558109ee9a7bb69b7414fab56c4701efcf488c8a7f96f",
+        "no_control": "sha256:e0809443da5ec2b31cc2668232681885e70aafb32df1e3d791a6fa07850334ef",
+        "enhance": "sha256:2ec5744f24a117fafe1f8882afdc92eed91f90b13580bbdea4c60a7398c1247b",
+        "suppress": "sha256:0da8101fc3e82834bf6730d1280198baeef256f4bb989e29deb8b2073d4d10c1",
+        "suppress_others": "sha256:73bbd3e680c75e4abe8388b2b5bb8d4e7259ec67e86caa04ee43513ff28b24ab"
+      },
+      "values": {
+        "prompt": 0.95087,
+        "reference": 1.0,
+        "no_control": 0.919024,
+        "enhance": 0.859173,
+        "suppress": 0.747948,
+        "suppress_others": 0.827263
+      }
+    },
+    "jmdmc__a_id_357163__t_1189183__s_000090000__e_000120000__c_c512cdb04159f29a": {
+      "sample_index": 203,
+      "group": "single",
+      "source_title": "Music For Streaming Expectations",
+      "fingerprints": {
+        "prompt": "sha256:7090a2432773b719e3763d41cf14c2011e9f8da430ff0ea498588a73ba329d86",
+        "reference": "sha256:05d9b525c062181593e99a305a97db6dd309e955942e4581ed1d6da29cd9b391",
+        "no_control": "sha256:e7048fb9a45838a0b57e5d1e85f22902636b7a669d60574f634ddbdf783503cd",
+        "enhance": "sha256:42b1d9e8f56e6dcac2764bd38a2c47805ce9d7dc3e41123ae3f6f147c5c63123",
+        "suppress": "sha256:4b80d72ef58d3a4f293b673d577ed39568149f11ac5abe551e8a4799e22657c0",
+        "suppress_others": "sha256:fef47d4ca5fc688a69dcd410bf453324ff5c6cf2c8371e76044280b8f4bed537"
+      },
+      "values": {
+        "prompt": 0.90314,
+        "reference": 1.0,
+        "no_control": 0.947081,
+        "enhance": 0.980258,
+        "suppress": 0.833569,
+        "suppress_others": 0.900387
+      }
+    },
+    "jmdmc__a_id_357163__t_1199581__s_000090000__e_000120000__c_2998442b3f4c5dc7": {
+      "sample_index": 221,
+      "group": "single",
+      "source_title": "FREE BGM for Dojin Animation Films",
+      "fingerprints": {
+        "prompt": "sha256:bcac93a9900ac54d576cb0db05b94f27b59eed8d5e353b54875fb8fb8dfe6a07",
+        "reference": "sha256:d45f954e3c88972e697cc5f658466661b7c91336079b28954cb881427a5203d4",
+        "no_control": "sha256:d7e5bf935f8f97326515a598ddda2b3197add86e19ecbace34d33558088c594e",
+        "enhance": "sha256:8dcc1ffddcc6d799e08cd8f1b742aeaf26cfc69adfafdc12e45d085bb9fc6c01",
+        "suppress": "sha256:1344432c9592d2126a3390b411e6598346d8bc0cbf2eb99e2f2c689d151dff81",
+        "suppress_others": "sha256:5739fc0ce1ad055145ca6966c74c23f40c74af300722c1e3a770a8e9e924e29f"
+      },
+      "values": {
+        "prompt": 0.962646,
+        "reference": 1.0,
+        "no_control": 0.973707,
+        "enhance": 0.959686,
+        "suppress": 0.729016,
+        "suppress_others": 0.802099
+      }
+    },
+    "jmdmc__a_id_357163__t_1217227__s_000120000__e_000150000__c_7ee9f7f660266c6b": {
+      "sample_index": 215,
+      "group": "single",
+      "source_title": "Music For Being Now Here",
+      "fingerprints": {
+        "prompt": "sha256:2096f486601b861e23d191ac3d61ee7120d07e7aecd9a4d420d58f60ce6b71ee",
+        "reference": "sha256:73cd10689c0263762ad6d9ae5b32075cf0c002f1f6d8f648a33cdc2b62e8fe75",
+        "no_control": "sha256:562816506b1f28da13043122f0500a682405b9c23ec2c92d45776c7ca3d3122f",
+        "enhance": "sha256:0054a910e6dbbd0b2afa001f71cd018b8e975d3f28dd8ffda160ffb554be2ee2",
+        "suppress": "sha256:2177957c54e697baafd2e2f3413c124077f90113dbedb67a8010cafb1a444967",
+        "suppress_others": "sha256:b535ad6449db07b09fd74e8d6a8915818a49caba96e184e2e439caaa39d2d8c5"
+      },
+      "values": {
+        "prompt": 0.950123,
+        "reference": 1.0,
+        "no_control": 0.920967,
+        "enhance": 0.906148,
+        "suppress": 0.833018,
+        "suppress_others": 0.90237
+      }
+    },
+    "jmdmc__a_id_540628__t_1902278__s_000120000__e_000150000__c_3a27a6bbb9c00f0e": {
+      "sample_index": 716,
+      "group": "single",
+      "source_title": "I Feel Great",
+      "fingerprints": {
+        "prompt": "sha256:177221ff3736c48219c78dc33ac5129cdc25d254f5d2f83b7acf2991466c0393",
+        "reference": "sha256:7b99908980876f522f3411912629e952fcf2a3a9a82bfe28015fb6e86f615252",
+        "no_control": "sha256:aaeb096f22cc03a0f68dd7b8b9bee37e1b822f290e4603cda550832f486a9d0f",
+        "enhance": "sha256:8363265a5bc31038b2ac149b2684686f261cad5789ec10756eda48451786d0b7",
+        "suppress": "sha256:276edf7de032a657bc901e042eadcd9563b1d63508f7e7b7ab1ee6f9f0a497c3",
+        "suppress_others": "sha256:25b3dd95148a02c6b52e7256fc8a10fab21f018242b99199f60998a3685d431d"
+      },
+      "values": {
+        "prompt": 0.965813,
+        "reference": 1.0,
+        "no_control": 0.966334,
+        "enhance": 0.917824,
+        "suppress": 0.805405,
+        "suppress_others": 0.938247
+      }
+    },
+    "jmdmc__a_id_522205__t_1686486__s_000000000__e_000030000__c_002262b3511ad5a6": {
+      "sample_index": 515,
+      "group": "single",
+      "source_title": "10. Years Go By",
+      "fingerprints": {
+        "prompt": "sha256:b49f85a996024086ea1209028a8fab3023d73574a5c16e5139656a2d278f181b",
+        "reference": "sha256:4e1f9f7716cfb4c4be7aeb7a462046e292970fc4a628f6f12ad824ca71d7c65a",
+        "no_control": "sha256:7b89b1ea927611ffe5c9c7a273bbcc8958de9b11de8b8d0741b18e1b77354ec5",
+        "enhance": "sha256:c3b67d46857475941a5536ef8be247056a5e78466d35a2ca7332310802ad6bf3",
+        "suppress": "sha256:7a62646002c24050b04a79567027d212f1386ab41105bda898d96c89c244add1",
+        "suppress_others": "sha256:961339f50164218555dbbcc4228b4e6281026ceba88c8b7eda48cb6a2941003e"
+      },
+      "values": {
+        "prompt": 0.956866,
+        "reference": 1.0,
+        "no_control": 0.971088,
+        "enhance": 0.961901,
+        "suppress": 0.843733,
+        "suppress_others": 0.922013
+      }
+    },
+    "jmdmc__a_id_357163__t_1226290__s_000030000__e_000060000__c_1075f5fcde1c68de": {
+      "sample_index": 204,
+      "group": "single",
+      "source_title": "Music For The Dawn",
+      "fingerprints": {
+        "prompt": "sha256:37c6f9fe8014c67814693a763d5ffc2eab6befe615a57be3065b9d242017e63a",
+        "reference": "sha256:67134e17a8fa0f36809be5574991517a34494457340c85a8639fb00ad1f365ef",
+        "no_control": "sha256:104ddb845f0f094b89bacb1e79b6a8fbe33d65dfd9d17c6360458761888f4d32",
+        "enhance": "sha256:61164517f5a277c37c2641f193ff0f070f5ec6823d1bbb5cb931b34bf8d73847",
+        "suppress": "sha256:2e1a41859962f655a2937793c79a016ea41d390f23e8366bffec5a7bf97bf2d9",
+        "suppress_others": "sha256:d6d78b7fb0644bafb79654def830fd4885cc6ba8220b1fe89ed14f5abe409ccf"
+      },
+      "values": {
+        "prompt": 0.956608,
+        "reference": 1.0,
+        "no_control": 0.956504,
+        "enhance": 0.950531,
+        "suppress": 0.770561,
+        "suppress_others": 0.919351
+      }
+    },
+    "jmdmc__a_id_441051__t_1100466__s_000150000__e_000168000__c_27ba084edbac0060": {
+      "sample_index": 396,
+      "group": "single",
+      "source_title": "Flower Garden Ball (Jerome-Schwartz)",
+      "fingerprints": {
+        "prompt": "sha256:0ae7d9dc7a4c1ed6f012b0d9e5871079f1a7639f0ff4c8b0c4ca7d1a0ade4113",
+        "reference": "sha256:d368c45d42b329f15388a71dafbe87d108498a194ea86b100406ff068149f595",
+        "no_control": "sha256:0ee1ea551cb04c33de8f1e7c382ed5f64330ee25e5d0774ed46b73efb682ca0d",
+        "enhance": "sha256:b30c40caf788778c460ad56266c031717e8ec795de1de169ee135a47a4046790",
+        "suppress": "sha256:a6bfb772c5c80d6372900fe8151ed42da44fd0a34ca75b2f587154f7cdbe5e5a",
+        "suppress_others": "sha256:156a90c6bb347c6902183dd4d5c56ab4e70ac3fc126ea15cee6204c8cda6b59c"
+      },
+      "values": {
+        "prompt": 0.955332,
+        "reference": 1.0,
+        "no_control": 0.940106,
+        "enhance": 0.940454,
+        "suppress": 0.789913,
+        "suppress_others": 0.858043
+      }
+    },
+    "jmdmc__a_id_487415__t_2034351__s_000120000__e_000150000__c_a072ecc9a95394b1": {
+      "sample_index": 454,
+      "group": "multiple",
+      "source_title": "Corporate Modern Technlogy",
+      "fingerprints": {
+        "prompt": "sha256:26810bd20cda1253345fd2e3695e795ac6f060b6c1627fd5cf8d88535b89b988",
+        "reference": "sha256:88e5fbb4552fd0f9bf28ed47ff5a18daa86e47c70f7230496217dc98a6aa3b8b",
+        "no_control": "sha256:b8628ce9bf6a83cfccf1a83e23acf979211f019810e3d49f2732aa406bba66d9",
+        "enhance": "sha256:436e7a3d10e1c526ba8c9ebaa6c7f523a37dcc43933b717d414532f2f62cd32b",
+        "suppress": "sha256:3e47365be2ad909af861d7acbd21eee6299be24d23dc139a993806d6d16ae0b1",
+        "suppress_others": "sha256:af327e2cdc966cf9c426f267dbe7959b2510ea72397ae5baf5772c7edf4c6d75"
+      },
+      "values": {
+        "prompt": 0.955039,
+        "reference": 1.0,
+        "no_control": 0.97175,
+        "enhance": 0.934088,
+        "suppress": 0.813672,
+        "suppress_others": 0.891669
+      }
+    },
+    "jmdmc__a_id_540628__t_1902280__s_000060000__e_000090000__c_a6f66c6811aac52e": {
+      "sample_index": 726,
+      "group": "multiple",
+      "source_title": "I Feel Great (Loop)",
+      "fingerprints": {
+        "prompt": "sha256:bda15ed3c3a086ee34a2457515ad12865ee36ac5e35296229d4e34f2867c4e13",
+        "reference": "sha256:45a5ac312bba7b2f7619c06407a435edf0ce354e26a72df349d48cacf1718e57",
+        "no_control": "sha256:773023c636166e1cc51a690d84d6a212587b7e0680c9d7b92afe8cf1bce59398",
+        "enhance": "sha256:672b6f7c9740d1e6ae650c267cee15a07a5312ef05c95c83f3e3b230a081ce66",
+        "suppress": "sha256:d1f5fa81c3fb56064acc836bc95dd1abc822af155736e041cf6b332bd656c734",
+        "suppress_others": "sha256:b41e3e0812b7aa06562643de16c3d2a67c86cd639abcb9d0249d0c4147656e7e"
+      },
+      "values": {
+        "prompt": 0.957992,
+        "reference": 1.0,
+        "no_control": 0.977807,
+        "enhance": 0.97159,
+        "suppress": 0.700021,
+        "suppress_others": 0.926294
+      }
+    },
+    "jmdmc__a_id_357163__t_1416778__s_000600000__e_000630000__c_b9159ac9ab1ea127": {
+      "sample_index": 202,
+      "group": "multiple",
+      "source_title": "Music For  Changing World 2017",
+      "fingerprints": {
+        "prompt": "sha256:74d0162513ff1e554f3ffdad87e09789b3a04008156c8e48c9640b9779c3dcac",
+        "reference": "sha256:6597bbbac7d41e7be7ec5e670a99c1e271a8168b79a90122de2ce51b4e85099c",
+        "no_control": "sha256:cc19991f088ce2fdfd92e9105170c0f229d27bb6a67e69f1a0b92775ef9b6327",
+        "enhance": "sha256:db8a49fa0f07490a1fe370574267d6acde6c4fab5bf7c171c514a13042634147",
+        "suppress": "sha256:fa3399f4de9b61597bd42dde5bb55847f24dbfda8d46b00d1fafc2cffb86f258",
+        "suppress_others": "sha256:d40049049f6b62127939f79a2965c603906ec3206218cf8ba6d3d8f2a4041193"
+      },
+      "values": {
+        "prompt": 0.926699,
+        "reference": 1.0,
+        "no_control": 0.977425,
+        "enhance": 0.912888,
+        "suppress": 0.854087,
+        "suppress_others": 0.738318
+      }
+    },
+    "jmdmc__a_id_357163__t_1396723__s_000000000__e_000030000__c_cd342ee66177b8eb": {
+      "sample_index": 216,
+      "group": "multiple",
+      "source_title": "Fading Out",
+      "fingerprints": {
+        "prompt": "sha256:935758c10106e5ceafe202594bc9532e5e4e1f35516c57701fc0b50817d09591",
+        "reference": "sha256:31b1c551aefaa04492ae1aec565dac5c6ee5008f169305e017c214ff4f8bcb42",
+        "no_control": "sha256:5ad2b135d2a959eab846f2e2ebfb8040483d67c719b50c810d50789a9d2da5bc",
+        "enhance": "sha256:da03a57c4330bc79fd6de2e8ea30ccc61a79c9885caf0b46a81a25555d9dff62",
+        "suppress": "sha256:32770a333c587967b9caede048e1c5c8f9aaf8a07e2f6fc872a3453c40770f41",
+        "suppress_others": "sha256:9307a5f30965c56ec5ca5097c3a3c7a942f1cf20dc665e7e1dc910f73247ac40"
+      },
+      "values": {
+        "prompt": 0.964964,
+        "reference": 1.0,
+        "no_control": 0.948203,
+        "enhance": 0.858978,
+        "suppress": 0.669611,
+        "suppress_others": 0.69057
+      }
+    },
+    "jmdmc__a_id_540628__t_1906033__s_000030000__e_000060000__c_7f753ce25ada9933": {
+      "sample_index": 711,
+      "group": "multiple",
+      "source_title": "Joyful New Day (Loop)",
+      "fingerprints": {
+        "prompt": "sha256:a5014528b75ee91a5685caa6e2e43cc1e67188615be292b7d07969086f7feff9",
+        "reference": "sha256:95cf61a2e2777436a6a39f6d4a4bf5f3dfe0c2842248c31bc51592f1c103d350",
+        "no_control": "sha256:6a0e7c8b9e1de0c1a12c9c6a34b01cfa4b4d8627add6baea9f2824c565933230",
+        "enhance": "sha256:5201979e5e4f8997271a9fc9a420b39a0e14ffd636a280db3685ae7557901a06",
+        "suppress": "sha256:a822c12803067f2c160e6b6b117f10ff2a1d9154b7cd469e811a28e973f56009",
+        "suppress_others": "sha256:770a56ccfb566f8d88c4a397b0887bea10e6f10026d7cdd6dd65aa7849da5e1c"
+      },
+      "values": {
+        "prompt": 0.937961,
+        "reference": 1.0,
+        "no_control": 0.97775,
+        "enhance": 0.981725,
+        "suppress": 0.820922,
+        "suppress_others": 0.959731
+      }
+    },
+    "jmdmc__a_id_522205__t_1686088__s_000000000__e_000030000__c_17b486787ca5e50f": {
+      "sample_index": 523,
+      "group": "multiple",
+      "source_title": "2. Bottle  Experience",
+      "fingerprints": {
+        "prompt": "sha256:f1a7104a6c56759771b137eae22f6de88800897c134deefd268d7a62b64a787d",
+        "reference": "sha256:4689b7a01e1aac707d3a8b1842a3d54dd0f30fe52a35fa76c61e84ff23e35aee",
+        "no_control": "sha256:b0695b61c8c531197f90eeaebcebf23a56bd6c84714a890c61d81f5bf12ea7a2",
+        "enhance": "sha256:fc0d3176e4e9d9169165612f0533d2a4734a04fff17c4647cc38bc3a9a11931a",
+        "suppress": "sha256:4fa07b3504a6e05b54b8c1c93bfe5c31b12eee88bcb465e50e00090df1b1e2af",
+        "suppress_others": "sha256:39500266dbf45164235e05311323d28881d60de511a68d95c226a83ef9160014"
+      },
+      "values": {
+        "prompt": 0.934359,
+        "reference": 1.0,
+        "no_control": 0.901142,
+        "enhance": 0.95596,
+        "suppress": 0.802083,
+        "suppress_others": 0.79241
+      }
+    },
+    "jmdmc__a_id_441051__t_1100470__s_000180000__e_000210000__c_507c634a248a0c38": {
+      "sample_index": 403,
+      "group": "multiple",
+      "source_title": "Humoresque Rag (C.F.Gall)",
+      "fingerprints": {
+        "prompt": "sha256:627d41d961db07559faa7c5f4ffe2688e94e2928854118744f4f8a5f41fd65fa",
+        "reference": "sha256:497440b7601f2918fa2ea74c79947e79a097821c4aaf684434a83be25e600d90",
+        "no_control": "sha256:06a4287ce56968ea66a49a52774114bc4732f5069c55bd4a6d027a4fe8937e56",
+        "enhance": "sha256:9746610832205a0717898e56d966e8a236395777e6de3ae37fd5e6d7746965c0",
+        "suppress": "sha256:6fd69acb09068239700289a787fffa8503805952fe6b123fb5c50ef2763d6c2a",
+        "suppress_others": "sha256:dce33aab56fa9a02dddc38c82f956c95b47604e60dc6a8b24e180662d9846f7e"
+      },
+      "values": {
+        "prompt": 0.920327,
+        "reference": 1.0,
+        "no_control": 0.919027,
+        "enhance": 0.909199,
+        "suppress": 0.836034,
+        "suppress_others": 0.924021
+      }
+    },
+    "jmdmc__a_id_540628__t_1902280__s_000030000__e_000060000__c_fc468660b23d1049": {
+      "sample_index": 710,
+      "group": "multiple",
+      "source_title": "I Feel Great (Loop)",
+      "fingerprints": {
+        "prompt": "sha256:637f96516be2ca5a2f0e7fe219b272a68ef7b974a4a825f0d16c1a93bf83c2c5",
+        "reference": "sha256:2b208d310d4ce67def07b72bebded1b89ed2f510469f68e6c88349b0e3517876",
+        "no_control": "sha256:6646806b73786652fc9e68f8fec39a0dfe20a3404071f93144113723652b7f46",
+        "enhance": "sha256:9adf15d25a17a78b5388898cbb2dd4f3fdc5dba6a107418a9619a60a9cc236ae",
+        "suppress": "sha256:1c963c917f09fb47497781de856f6569d101fe7f9bffb69478b44f77d8563855",
+        "suppress_others": "sha256:9642478a3414e5751aaca14ed2162338cf34442fba9043f3e771703211e16679"
+      },
+      "values": {
+        "prompt": 0.945311,
+        "reference": 1.0,
+        "no_control": 0.967468,
+        "enhance": 0.962699,
+        "suppress": 0.860473,
+        "suppress_others": 0.800824
+      }
+    },
+    "jmdmc__a_id_470221__t_2064869__s_000180000__e_000210000__c_dd00a30a71e2b686": {
+      "sample_index": 994,
+      "group": "multiple",
+      "source_title": "7-8-23~a",
+      "fingerprints": {
+        "prompt": "sha256:054602965e4c2ba4d1ac6c02ce481dc9b00d8273e4967f393293631e3479d69f",
+        "reference": "sha256:c8c1a36a43f43c4a75e6111477fc5df5cbc2adad45a8b427270f4f7ea61c9cd2",
+        "no_control": "sha256:ed273e6b7ad612bf2bb899bfedbb5ccc347f6165aa04ad63881b26a07259a2ee",
+        "enhance": "sha256:ac1545294d8de7d0a2279ef54d1f76054d03ea6653eb13272b5b9bdc61253c51",
+        "suppress": "sha256:c2c2a8cb9c8063ff4c5cc43d86f4742c4bdb42c527d1aac9f6875a0b6f713f9e",
+        "suppress_others": "sha256:149c203e0898989a6fa6e5e1558e599a138d0449d7402dd366dff4dc0e4999be"
+      },
+      "values": {
+        "prompt": 0.908339,
+        "reference": 1.0,
+        "no_control": 0.838657,
+        "enhance": 0.687724,
+        "suppress": 0.695608,
+        "suppress_others": 0.772713
+      }
+    },
+    "jmdmc__a_id_540628__t_1906035__s_000090000__e_000120000__c_2cef805dac9d63c9": {
+      "sample_index": 719,
+      "group": "multiple",
+      "source_title": "Joyful New Day",
+      "fingerprints": {
+        "prompt": "sha256:2db999e1cba3eb428bb0c6bfae056976ce5b78c25797c161835863d12188e181",
+        "reference": "sha256:1c6c243919d85584d2736adf4ef0199f497167534cd621ac4a1e61e4d856ffe8",
+        "no_control": "sha256:8b06b2773763ef2f96e18e8dc659b671cadc030d10e400201ef79355bd9eaa3d",
+        "enhance": "sha256:31783891098aa55ff50cd6cf34e3710b222b32f0475e7182ada1deb493ba2034",
+        "suppress": "sha256:888e33f48e1269cffc4862a995c6d586fdc20b7d7387756ec867408d78777ecb",
+        "suppress_others": "sha256:4262fc1763b94e0d63d647ea1fb86c8d39f93e62c00eb505764a150e5feb9e94"
+      },
+      "values": {
+        "prompt": 0.924051,
+        "reference": 1.0,
+        "no_control": 0.973219,
+        "enhance": 0.981974,
+        "suppress": 0.801193,
+        "suppress_others": 0.764191
+      }
+    },
+    "jmdmc__a_id_487415__t_2131478__s_000090000__e_000117000__c_3185a498a01a4b62": {
+      "sample_index": 453,
+      "group": "multiple",
+      "source_title": "Corporate Ambient Background Short Version",
+      "fingerprints": {
+        "prompt": "sha256:670a1d0b9e46a3719081b8af6fa8f5c409b3b3317343483079a279eb6802832b",
+        "reference": "sha256:9cfb03ce0f124e80d5159effe77ccc0c28cbbb09ccef42b0c0504315e81f35bc",
+        "no_control": "sha256:050a8770d24d0873b692773d808d5337d97061515b9a7a39ce992d29ab1e5f33",
+        "enhance": "sha256:02b496f13befe177f98c5826cd0405f4e96d957c8b2083c58fa595876c2e6d0e",
+        "suppress": "sha256:8692e1ebb2eb9ff59a6b3d5ecb7257dbbb3e2d48026c7706ca63d592ec581722",
+        "suppress_others": "sha256:08f65d6be4837d6b18fd4acb2d34b5b5be277896210645fc015812da71ef20a0"
+      },
+      "values": {
+        "prompt": 0.760771,
+        "reference": 1.0,
+        "no_control": 0.760323,
+        "enhance": 0.760859,
+        "suppress": 0.81602,
+        "suppress_others": 0.804473
+      }
+    },
+    "jmdmc__a_id_357163__t_1465941__s_000810000__e_000840000__c_9e45d0685c130a91": {
+      "sample_index": 1438,
+      "group": "single",
+      "source_title": "Reflections In The Morning #1",
+      "fingerprints": {
+        "prompt": "sha256:b8570e7eb3002535db0fe5820fef730f8ebed91901e1f07863f6c60a8f86ded1",
+        "reference": "sha256:85ebc40b3af2077954bcab0b8e914773fde65e17178d806cd93c7cf50e25048d",
+        "no_control": "sha256:ef5006db8904cd80e7739d22487c33203672bb605d634ecf1bc0ed3eeb93d69d",
+        "enhance": "sha256:178529aa3a4e4f042b2339ee70545ab16468dfad996e46458fdb928e60f297d3",
+        "suppress": "sha256:b6915535d19eceec4ef29ac3908d038da810d1b4f0dddddc810fb1cdeafbfce2",
+        "suppress_others": "sha256:d95a497031e46f7cc8fd588af6b11b0d5938dbabcb39f3ba2705fbca8dda5254"
+      },
+      "values": {
+        "prompt": 0.964709,
+        "reference": 1.0,
+        "no_control": 0.945023,
+        "enhance": 0.874845,
+        "suppress": 0.833862,
+        "suppress_others": 0.865729
+      }
+    },
+    "jmdmc__a_id_521579__t_1744869__s_000030000__e_000060000__c_3371584a7976fb81": {
+      "sample_index": 7,
+      "group": "single",
+      "source_title": "Keep it in your heart",
+      "fingerprints": {
+        "prompt": "sha256:e827f514e624bd574496dfb23fb20b71e7b9ea528544d86a7dcb859f412156df",
+        "reference": "sha256:c549d6895338da6e4b1223fb5e33a2cb06cff5be8442b494b420fc96a588022f",
+        "no_control": "sha256:56a8935718a4ea47d74b6fcec92beae00b3489634d3a55e41b04cd5b469e826a",
+        "enhance": "sha256:14729837ed5129d80ee6db86387a644edd6f5907d7a92b088748f1cbb5a2e98c",
+        "suppress": "sha256:65ed4d6469c1e97417ee8df3cb35ca8296deb906f7fc9de0fc50afdc0d1f1ec3",
+        "suppress_others": "sha256:c914692699cd910033941345cf07e50aee74486fc785444231c7a80e3a994496"
+      },
+      "values": {
+        "prompt": 0.909585,
+        "reference": 1.0,
+        "no_control": 0.943139,
+        "enhance": 0.923411,
+        "suppress": 0.856856,
+        "suppress_others": 0.877954
+      }
+    },
+    "jmdmc__a_id_540628__t_1902280__s_000090000__e_000112000__c_0148277f9b0514f9": {
+      "sample_index": 1740,
+      "group": "single",
+      "source_title": "I Feel Great (Loop)",
+      "fingerprints": {
+        "prompt": "sha256:819f75624b772a61ace9c486015716f803f41f7b3d67bca96955f9196e2caaa9",
+        "reference": "sha256:78887d7b13872c918e1de480fbd1a66a9d53e9084ed62708767200ecafc1d1c9",
+        "no_control": "sha256:804627c38a15c4b7c11804a84046f873edcdfcc8f408c408575608bbff01dc6b",
+        "enhance": "sha256:dc260f782514d452ad014f28ad24e4095b3bb2a15cd53189485e7efb17fc8087",
+        "suppress": "sha256:348470724a051de532f9bb250336ca1166442d49fc3e649cccef9b5f8a083af6",
+        "suppress_others": "sha256:a5b8eaf8519abe786b0d5e3dea2750f367aa0bd0f746de8318593729072b1a35"
+      },
+      "values": {
+        "prompt": 0.94613,
+        "reference": 1.0,
+        "no_control": 0.985511,
+        "enhance": 0.974805,
+        "suppress": 0.860046,
+        "suppress_others": 0.972111
+      }
+    },
+    "jmdmc__a_id_521579__t_1684035__s_000060000__e_000090000__c_60fe21b71d73a255": {
+      "sample_index": 29,
+      "group": "single",
+      "source_title": "Playing with the wind - Igor Lisul",
+      "fingerprints": {
+        "prompt": "sha256:bd86182b0cf72cb2672f0eb37a33ac4bf834d94032c1c9617c0b79b6b5eeb68a",
+        "reference": "sha256:ffbcb2986e32372cc62a1b83af564ba1a587e9150fa172bd8b0735aa197f6d37",
+        "no_control": "sha256:fdaf39b4fd07f38994c96a3e767ea3100be9ffe757fd580c3bb177a4f4a4aeec",
+        "enhance": "sha256:3f30a79e64070b377452cc7365df351702f14bbf64588108c67cef35e27a2902",
+        "suppress": "sha256:993eaa9873c1903641f850fb6c55ab9bfaad0e3f431ba8e8601a4258633cbb58",
+        "suppress_others": "sha256:b5aa65b9a52b675d1bac762183dd5eba4b47fdf0bcca363986bae2e04f0a7c25"
+      },
+      "values": {
+        "prompt": 0.977951,
+        "reference": 1.0,
+        "no_control": 0.944465,
+        "enhance": 0.93671,
+        "suppress": 0.915225,
+        "suppress_others": 0.875632
+      }
+    },
+    "jmdmc__a_id_521579__t_1768501__s_000120000__e_000150000__c_41956ab5fc21f9eb": {
+      "sample_index": 31,
+      "group": "single",
+      "source_title": "Sense of love - Igor Lisul",
+      "fingerprints": {
+        "prompt": "sha256:5c59f27b2b02679d7a9575dd8eeb344ee7992aa14f9ce3ed95fb2b69dfd1bb2e",
+        "reference": "sha256:cef9436d505b12f58393a3735060cd1de4090832ba52eee03d5b6a769ece517e",
+        "no_control": "sha256:6d7bf3c951df6e0f33b6bb0c51ac7221284cd76b199654f3d2087eb832b6ead9",
+        "enhance": "sha256:b0d0073e7494aae083f33f35e195e095ea4b4828a5759a00dda177449eef2346",
+        "suppress": "sha256:ddcfd9ba2c2a265584310ef8d5d5e06c01dd32656a7f283245b01a60180674a2",
+        "suppress_others": "sha256:09769cdfb59e646f28c54fe27bf76f5d77455a8e99219522f2dde5d68a69343e"
+      },
+      "values": {
+        "prompt": 0.919565,
+        "reference": 1.0,
+        "no_control": 0.92712,
+        "enhance": 0.935994,
+        "suppress": 0.870568,
+        "suppress_others": 0.521069
+      }
+    },
+    "jmdmc__a_id_357163__t_1233292__s_000030000__e_000060000__c_4736ff3bf1b98409": {
+      "sample_index": 1414,
+      "group": "single",
+      "source_title": "jingle For The Distance",
+      "fingerprints": {
+        "prompt": "sha256:d80dd7e0f522c4d4a631b84ad48b4efb22023c306f3bd6d021870af0f3c8476d",
+        "reference": "sha256:ace234bfcf7ed86fe9d3b29555751d595f018fc3bb030ba9429b2195f11fe5c6",
+        "no_control": "sha256:8e2ff0491e6ffcce5a960fa1c00d5c108090e73816af9ac9d7478f03be59296c",
+        "enhance": "sha256:c83151fa6320b6df2727bc8f814d5a2f62e2d620cb0a3f9092fecc3fd642bb03",
+        "suppress": "sha256:a14dc1f2f01ef0d45e5ed1a0149020592b8f64bbf906bd13c2205de26dbde775",
+        "suppress_others": "sha256:efcac03dcca4cca8fc80deeae196ae08ca921138ee8d94f06a28997e17ec5061"
+      },
+      "values": {
+        "prompt": 0.914198,
+        "reference": 1.0,
+        "no_control": 0.938253,
+        "enhance": 0.948575,
+        "suppress": 0.670041,
+        "suppress_others": 0.892586
+      }
+    },
+    "jmdmc__a_id_357163__t_1208531__s_000360000__e_000390000__c_dbb767272e5854c3": {
+      "sample_index": 1408,
+      "group": "single",
+      "source_title": "Music For Relaxing and  Jogging",
+      "fingerprints": {
+        "prompt": "sha256:8da2e7004d0fb31a47186eb7b071eaa14c910ee28abb54b286654554b3c125ed",
+        "reference": "sha256:7cfadc01bd80a66e1fc78ad6efa7f9eb5548bc9e8d5d7fdbf76b549525a01a96",
+        "no_control": "sha256:eda2e3861b17990acde367262c87d148fc816ca1ce68d11c72e701e188b0390b",
+        "enhance": "sha256:99522bf141d092115e66fb036e4cbd1c0704f3bb559505c308c3b86226cb1c0c",
+        "suppress": "sha256:db9c871850f6cf81d07c24eaf58885fe88139a7d2d20d1290ade7874f99770e8",
+        "suppress_others": "sha256:6a15256e9a140b6d60250eaedfc61a04d3ec7d7561842c654a9be98554a90c6a"
+      },
+      "values": {
+        "prompt": 0.931991,
+        "reference": 1.0,
+        "no_control": 0.974814,
+        "enhance": 0.948294,
+        "suppress": 0.817703,
+        "suppress_others": 0.893371
+      }
+    },
+    "jmdmc__a_id_540628__t_1902280__s_000000000__e_000030000__c_9c74cb5b00337f92": {
+      "sample_index": 1752,
+      "group": "single",
+      "source_title": "I Feel Great (Loop)",
+      "fingerprints": {
+        "prompt": "sha256:66dfad466e455b8a21d47dd300482fcaf095ab0eec649d6d6d98a9432bd4520c",
+        "reference": "sha256:ab564443b9f14c62fc9d7acada20d833a6deedd66c4902fc0c3f10a3edf48ccd",
+        "no_control": "sha256:87756f13417345a577e427762287259b6da09edb90eae46dccdadcc1bc27e533",
+        "enhance": "sha256:449b4b2d0886798f818d1cc43fe7d90ed3ea621e3562b131f28188f909da9c5d",
+        "suppress": "sha256:bccef1f8a8787c54eb1c6f93ea004d37d351cd318187dd376ebd15c1db99bffe",
+        "suppress_others": "sha256:ff32b79639fb3bfcb63b0931c66a37984e24af1bd48f4cfd094d0c27b0900ee9"
+      },
+      "values": {
+        "prompt": 0.959954,
+        "reference": 1.0,
+        "no_control": 0.96941,
+        "enhance": 0.953203,
+        "suppress": 0.882519,
+        "suppress_others": 0.985414
+      }
+    },
+    "jmdmc__a_id_368880__t_883211__s_000060000__e_000090000__c_4dafbf9f6bc966fa": {
+      "sample_index": 984,
+      "group": "single",
+      "source_title": "Dry Winter (original mix)",
+      "fingerprints": {
+        "prompt": "sha256:4a051d9a83ab671ff4d25fba9aa0e862846ad3729367370c9105b8df61c7860a",
+        "reference": "sha256:3112b2ab79abb8a4520509e55e70b7c2ea66fb668e84ab1b475dc17465e453a1",
+        "no_control": "sha256:640ace7230ac0e4f480e81f679e8eb944cfa7615f1cf79aafca8e4d6587964b7",
+        "enhance": "sha256:f39a55a93550a9def2a69b3347b7fac36ea7517395d817eb41c2a4bd64abc49b",
+        "suppress": "sha256:7353bf219e3d02ee586cac92cf32d056268ff452957f6113470c21e92f4be86b",
+        "suppress_others": "sha256:582583e4675e7d56e12e05755956c7014715a5d73260a1469339cb8f05823810"
+      },
+      "values": {
+        "prompt": 0.969581,
+        "reference": 1.0,
+        "no_control": 0.963564,
+        "enhance": 0.840489,
+        "suppress": 0.531264,
+        "suppress_others": 0.721502
+      }
+    },
+    "jmdmc__a_id_501902__t_1863868__s_000120000__e_000150000__c_bdd27cec46d596f7": {
+      "sample_index": 873,
+      "group": "multiple",
+      "source_title": "10 Derriere Toi",
+      "fingerprints": {
+        "prompt": "sha256:56e4aab841bcfedcd1d33bad85a93261ee974f89d71d7348147a3332e21aeaaf",
+        "reference": "sha256:6514654506837bc23b3519cac6e9e415ee5c6851fc3e8c035b66c63c0f928e9d",
+        "no_control": "sha256:383cfe01305dc46b8d6dc78a6df6a4b52f19438177d02a16cbc92b5b3ffc7a91",
+        "enhance": "sha256:22a1c1e33bcba2fed66f2df0d8d08eeca2aee457a0bd6ce48daa40f06e76556f",
+        "suppress": "sha256:585dbaf80e2641ac45790d4fb345e17bf4a23e63a0485ffa63be8fcefff520cc",
+        "suppress_others": "sha256:ecb2fbf8e9d27ab94bc63cf345e99b29b6ea2094d0aef4a6387d5a29c17f2d39"
+      },
+      "values": {
+        "prompt": 0.876171,
+        "reference": 1.0,
+        "no_control": 0.874098,
+        "enhance": 0.865306,
+        "suppress": 0.915752,
+        "suppress_others": 0.843441
+      }
+    },
+    "jmdmc__a_id_365166__t_1029076__s_000660000__e_000688000__c_ff74a1d37ee36c36": {
+      "sample_index": 223,
+      "group": "single",
+      "source_title": "Daitarn viaggia veloce sul treno e arriva a Sharm El Sheik",
+      "fingerprints": {
+        "prompt": "sha256:1a2680a54124d450e4b585ab4034f3a7c115d597408063fae729cf6540dd74c6",
+        "reference": "sha256:91e5315de541ec46750dc943f56c624e1f3e129b32c6cc5d550afcdce2290624",
+        "no_control": "sha256:8d26ccdc2707b0a958eeb8919c00a0c5f60f187f7957846bc42a0847be8df647",
+        "enhance": "sha256:87fb4df0bd4be9f0c787ee75c5fe0d37032d1609942533c3922ca3a7962fa1ab",
+        "suppress": "sha256:c18e903afe784d8540e71da72698cb495fdc2e717c88d08b9ac5b4745e80773f",
+        "suppress_others": "sha256:3abc687e79722ee8696e7e87f5aae404494d82ae6b9c3df356fe1aa7e6cb7db2"
+      },
+      "values": {
+        "prompt": 0.935345,
+        "reference": 1.0,
+        "no_control": 0.919508,
+        "enhance": 0.938255,
+        "suppress": 0.840597,
+        "suppress_others": 0.938325
+      }
+    },
+    "jmdmc__a_id_7063__t_1061410__s_000090000__e_000120000__c_87f0072612cc97a8": {
+      "sample_index": 671,
+      "group": "multiple",
+      "source_title": "Spaceship (instrumental)",
+      "fingerprints": {
+        "prompt": "sha256:57bee6ea891ffcdc65e2e02627505ff36d392abba0eedee1a7b80c833844a497",
+        "reference": "sha256:73c5da54d329dee4d32022da03298abeffcc2ae14347156311ae21d0e8db6415",
+        "no_control": "sha256:8e1da02e2ab957125c5fdebef4206c0815fd937fc9b124cb9d80ca2b6d0e3ee8",
+        "enhance": "sha256:736bebbd8cb4cec27e0d37e569dcb261c1197810fec42b401aa391557a153d53",
+        "suppress": "sha256:3c3692bc25ee1f8db3bebb68882b11c976070b0481ce52738c9390ac7663fedb",
+        "suppress_others": "sha256:a0b8af9748d67f9d111db7f7194db89ad16c9623e3d8123c96eef90b7c9f31e2"
+      },
+      "values": {
+        "prompt": 0.960189,
+        "reference": 1.0,
+        "no_control": 0.962423,
+        "enhance": 0.965708,
+        "suppress": 0.861823,
+        "suppress_others": 0.855271
+      }
+    },
+    "jmdmc__a_id_496074__t_1441822__s_000030000__e_000060000__c_1e28854c8fae3f0d": {
+      "sample_index": 1645,
+      "group": "single",
+      "source_title": "Drum and bass",
+      "fingerprints": {
+        "prompt": "sha256:4a7a4077a4d438002c37acb661cc569cc91a39d4e528929f860e39ae47ba9c45",
+        "reference": "sha256:51ec0d85f93f2f934b857462ba115e1f392c11ea35e4d7083d080241f9e84e34",
+        "no_control": "sha256:32cc362523df07ac6aa4f0b54080b5b2424120859c2b1557f0744dfbfe30f408",
+        "enhance": "sha256:163d7936b0d026e985b5cd722235edab923551bbb2f8b37e2c06ad1096b284a1",
+        "suppress": "sha256:56a02664b2ad12301e74a7183393e984c17e650cac2c8f2f24fdff6934b4e8b2",
+        "suppress_others": "sha256:3c6bd2584aba731081a2bd27a8301741804101093f3eb87ad95d0ea695401780"
+      },
+      "values": {
+        "prompt": 0.926793,
+        "reference": 1.0,
+        "no_control": 0.859401,
+        "enhance": 0.949727,
+        "suppress": 0.863906,
+        "suppress_others": 0.818806
+      }
+    },
+    "jmdmc__a_id_362354__t_1115741__s_000090000__e_000120000__c_349b852519b15bee": {
+      "sample_index": 803,
+      "group": "multiple",
+      "source_title": "Rune X - the forgotten Path...",
+      "fingerprints": {
+        "prompt": "sha256:e895b2f0b790c69b66516db211a6431f2fdde36e34be36843ba456b9e0b3aef0",
+        "reference": "sha256:112955c0771ae2425b306d4f4eba75e2e2bb38a4242c44e4cf2369a9c948012e",
+        "no_control": "sha256:f4f1f6e9b1bba9a2850bc4a35297b4d0b565e14a3295a6c396c53471fd627474",
+        "enhance": "sha256:1877b72958a0f51a1d5b9ef74c0574dfc3bd32425b16a8e0b9f25324f6117ec8",
+        "suppress": "sha256:a7f18eaf9afa8d1294c8a564b3531ab752c41c3f1ebe505318e798e76b8e2580",
+        "suppress_others": "sha256:cc9115170340985308f1b3943c4e6d124fe4f4d9cb8def9fcd16967cefa816fd"
+      },
+      "values": {
+        "prompt": 0.923974,
+        "reference": 1.0,
+        "no_control": 0.967997,
+        "enhance": 0.971488,
+        "suppress": 0.683612,
+        "suppress_others": 0.92046
+      }
+    },
+    "jmdmc__a_id_357163__t_1396722__s_000060000__e_000090000__c_ae437550574027df": {
+      "sample_index": 1422,
+      "group": "multiple",
+      "source_title": "Song For Melting Into One",
+      "fingerprints": {
+        "prompt": "sha256:10950249b1f5943e2e9aae1ad618101328f05e7c6d928fcac8a2c0adb0607fd0",
+        "reference": "sha256:841d08bd822d0a3d5641af041351e067756bb31e710bf3c1ed6dd38d6851fdc4",
+        "no_control": "sha256:2080fa7f21a1d82e2556cbf970b5544f357fad0cdef99b31290a5cb101ab2e01",
+        "enhance": "sha256:52b488d36fc364205c8ebb288a59a3fe1da8a090afd8e09fc2bc6c9c3b12610f",
+        "suppress": "sha256:4bbbd7dabfdb98d009860ccf4813675f7ee529e7bd08cbe1dd583642205add97",
+        "suppress_others": "sha256:8c1969e96550b186f4867326a31b83c071d5efc21260be6841b7c1790037c6de"
+      },
+      "values": {
+        "prompt": 0.935739,
+        "reference": 1.0,
+        "no_control": 0.946662,
+        "enhance": 0.895921,
+        "suppress": 0.653745,
+        "suppress_others": 0.897166
+      }
+    },
+    "jmdmc__a_id_478536__t_1678825__s_000090000__e_000120000__c_47d4925a38f14748": {
+      "sample_index": 235,
+      "group": "multiple",
+      "source_title": "Rethinking Feelings",
+      "fingerprints": {
+        "prompt": "sha256:1deeff72c3e3de34a8d5a3d40c1ae8249ff5bd63acde5f7ebdec4dba81dbcfc6",
+        "reference": "sha256:cb55f7f1ebb263739f3b2b7d5c781a07b322a616d71d4f43627ea0eeded4cd41",
+        "no_control": "sha256:77ed10b439f55bcf38c73e64d31f5742c93b1d1be291356b0af78ff089514247",
+        "enhance": "sha256:1c8aa115990d989d83250771b8fe691c0168d157dad870a299a94ac3358cc2c1",
+        "suppress": "sha256:77e0b676c14552b2fe729360eac0cf7b466b990dc2c673d312eb627515aeb936",
+        "suppress_others": "sha256:5945a31c7a272f4a377625cf689eb3daf7bba735218b62de5b551515f6b19296"
+      },
+      "values": {
+        "prompt": 0.957473,
+        "reference": 1.0,
+        "no_control": 0.956849,
+        "enhance": 0.880922,
+        "suppress": 0.849259,
+        "suppress_others": 0.611866
+      }
+    },
+    "jmdmc__a_id_501902__t_1978744__s_000090000__e_000120000__c_df693a5b0ca1f584": {
+      "sample_index": 884,
+      "group": "multiple",
+      "source_title": "02 Obtus",
+      "fingerprints": {
+        "prompt": "sha256:ccc70b55debd9a6dbf479e1742b41ee79df26ec0fc127666f0ac8dd1a82f2841",
+        "reference": "sha256:2db2bb171a2d5b9599fe3cc9c1bf65f1266288088581725b1b6664282938d341",
+        "no_control": "sha256:bb4b447f70a74a0170507dfd05124fb995e2772017ae683f27b9e8dd1bdc3211",
+        "enhance": "sha256:c60220b873ef6ddce8ea05c1a74c749f062f85d0e4844536e6c99cd1ad5fa507",
+        "suppress": "sha256:9747e72e63c77c2c5fcde7edcef2ce988e818036b53c6725b393a15f467ab7e9",
+        "suppress_others": "sha256:a8d294f3f258d3135b88894893007b8d3347ddac3e6ebb57441ad56bf1a7d269"
+      },
+      "values": {
+        "prompt": 0.926796,
+        "reference": 1.0,
+        "no_control": 0.936362,
+        "enhance": 0.946232,
+        "suppress": 0.79813,
+        "suppress_others": 0.741401
+      }
+    },
+    "jmdmc__a_id_7063__t_1061386__s_000030000__e_000060000__c_fea292b61270dde1": {
+      "sample_index": 649,
+      "group": "multiple",
+      "source_title": "Endless Hours (instrumental)",
+      "fingerprints": {
+        "prompt": "sha256:aa827ffd29821d5c29f346ef5aca254fa20f451cae1a73757f176c0a7053cee6",
+        "reference": "sha256:f0c70cc86e2ba47b0c87b9f37d69644ecbd8fd7c113de614176ee9c02d45402e",
+        "no_control": "sha256:8ddf41036780c721601bccd6716bab846cbbb05a3fc93891a4c5a9eb0de12217",
+        "enhance": "sha256:eeba151b99d1f24aba796164fbf0b1abb13bb677dd74c88bf35625f2e27a2cbb",
+        "suppress": "sha256:80b170dda635838660284bc989e9b1a8ff78935bf29bd17e8eff2060da9f0837",
+        "suppress_others": "sha256:613d3139650daf03bc1ea45258284a351cc5aa6ae30c74152b9c971174961b3f"
+      },
+      "values": {
+        "prompt": 0.947805,
+        "reference": 1.0,
+        "no_control": 0.9176,
+        "enhance": 0.948251,
+        "suppress": 0.809609,
+        "suppress_others": 0.7466
+      }
+    },
+    "jmdmc__a_id_470221__t_2065766__s_000000000__e_000027000__c_df55a9b46ec5f5b0": {
+      "sample_index": 447,
+      "group": "multiple",
+      "source_title": "excerpt 24-5-99~1c",
+      "fingerprints": {
+        "prompt": "sha256:c83e4b45e8bbc627efe6040e345bb64f95eacabee9633b0dd6c32c54c7ca4bc6",
+        "reference": "sha256:3a07e076f302b0471854cf6e9f856a92f6f2b0ce45ae189f1ea05b59cfe3385c",
+        "no_control": "sha256:8292dc1c6a901a7714eca701dc76fdeba9ae3c42152a5fe11791b87148270436",
+        "enhance": "sha256:3c149508e358bc4217bbeb4e2da90fabfa7e133f67c34043bf08ab694f56dec3",
+        "suppress": "sha256:7b7fedc427c7002043601d23a54041d289701e915f704f343861fd1de26fa98e",
+        "suppress_others": "sha256:54e92947d58363b2dd33866d6e145422d9845e19b3151c28e18e6492f03782c9"
+      },
+      "values": {
+        "prompt": 0.771861,
+        "reference": 1.0,
+        "no_control": 0.742186,
+        "enhance": 0.666222,
+        "suppress": 0.814491,
+        "suppress_others": 0.757609
+      }
+    }
+  }
+}

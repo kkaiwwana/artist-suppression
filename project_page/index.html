@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta
+      name="description"
+      content="Project Page: Learning Post-Hoc Artist Controls For Artist
+Suppression In Audio Music Generation"
+    />
+    <title>Learning Post-Hoc Artist Controls For Artist
+Suppression In Audio Music Generation</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="assets/css/styles.css" />
+    <script src="assets/js/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="#top">Learning Post-Hoc Artist Controls For Artist
+Suppression In Audio Music Generation</a>
+        <nav class="site-nav" aria-label="Primary navigation">
+          <a href="#abstract">Abstract</a>
+          <a href="#demo">Audio demo</a>
+          <a href="#results">Results</a>
+          <a href="https://github.com/kkaiwwana/mus-unlearning">Code ↗</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" id="top">
+        <div class="page-width">
+          <h2>Learning Post-Hoc Artist Controls For Artist
+Suppression In Audio Music Generation</h2>
+          <p class="authors" aria-label="Authors">
+            <span>Kai Wang</span>,
+            <span>Sunyou Shi</span>,
+            <span>Yuxiang Wu</span>,
+            <span>Shengchen Li</span>,
+            <span>Jacopo de Berardinis</span>
+          </p>
+          <div class="hero-actions">
+            <span class="button is-disabled" aria-disabled="true">Paper</span>
+            <a class="button is-secondary" href="https://github.com/kkaiwwana/mus-unlearning">Code</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-section page-width" id="abstract">
+        <h2>Abstract</h2>
+        <p class="abstract-copy">
+          Uncertain data provenance and changing artist consent motivate data-side and model-side safeguards, while all require re-training, for music generation. To address this problem, we hypothesise that additive directions learned to improve prediction on an artist's recordings can be reversed to suppress artist-associated characteristics without request-specific updates to the generator.
+Our method jointly learns a compact bank of artist conditions and a shared decoder produce layer-wise controls after removing peer references, which isolates artist-specific structure from properties shared with stylistically close artists. These controls are later added to enhance and subtracted to suppress a given artist, accompanied by a specificity regularizer bounds the effect of such controls on unrelated artists.
+On MusicGen with 128 artists, these controls reduce artist attribution of an independent artist classifier from 42% to 14% for single requests and 7% for joint requests, while leaving generation unchanged whenever no request is in force.
+Suppression is therefore immediate, reversible and composable across requests, making it a practical complement to data-level removal.
+        </p>
+
+        <figure class="main-figure">
+          <img
+            class="main-figure-image"
+            src="assets/images/main.svg"
+            alt="Overview of the proposed music unlearning method"
+          />
+        </figure>
+      </section>
+
+      <section class="demo-section" id="demo">
+        <div class="page-width">
+          <div class="section-heading">
+            <div>
+              <h2>Audio comparisons</h2>
+              <p>
+                Listen to the prompt and reference first, then switch between generated outputs at
+                the same playback position. MERT–GT is cosine similarity to the reference; higher
+                values indicate greater similarity.
+              </p>
+            </div>
+            <label class="demo-option">
+              <input type="checkbox" data-toggle-suppress-others />
+              <span class="demo-option-switch" aria-hidden="true"></span>
+              <span class="demo-option-copy">
+                <strong>Show Suppress Others</strong>
+                <small>Include non-target comparisons</small>
+              </span>
+            </label>
+          </div>
+
+          <div class="demo-groups" aria-live="polite">
+            <div class="load-state" data-load-state>
+              <span class="load-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+              <p>Preparing the listening examples…</p>
+            </div>
+
+            <section class="sample-group" data-group="single" hidden>
+              <div class="group-heading">
+                <div>
+                  <h3>Single-target suppression</h3>
+                  <p>Examples in which one selected musical identity is suppressed.</p>
+                </div>
+                <button class="text-button" type="button" data-expand-group="single">Expand all</button>
+              </div>
+              <div class="sample-list" data-sample-list="single"></div>
+            </section>
+
+            <section class="sample-group" data-group="multiple" hidden>
+              <div class="group-heading">
+                <div>
+                  <h3>Multiple-target suppression</h3>
+                  <p>Examples in which multiple musical identities are suppressed jointly.</p>
+                </div>
+                <button class="text-button" type="button" data-expand-group="multiple">Expand all</button>
+              </div>
+              <div class="sample-list" data-sample-list="multiple"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-section page-width" id="results">
+        <div class="section-heading">
+          <div>
+            <h2>Quantitative results</h2>
+            <p>Quantitative evaluation of suppression efficacy, preservation, and generation quality.</p>
+          </div>
+        </div>
+        <div class="table-wrap" data-results-root aria-live="polite">
+          <p class="results-state">Loading quantitative results…</p>
+        </div>
+      </section>
+
+      <section class="citation-section">
+        <div class="page-width citation-inner">
+          <div>
+            <h2>Citation</h2>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer page-width">
+      <p>Learning Post-Hoc Artist Controls for Artist Suppression in Audio Music Generation</p>
+      <a href="#top">Back to top ↑</a>
+    </footer>
+
+    <template id="sample-template">
+      <details class="sample-card">
+        <summary>
+          <span class="sample-number"></span>
+          <span class="sample-summary-copy">
+            <strong class="sample-title"></strong>
+            <span class="sample-artist"></span>
+          </span>
+          <span class="sample-duration"></span>
+          <span class="summary-icon" aria-hidden="true"></span>
+        </summary>
+        <div class="sample-body">
+          <p class="sample-caption"></p>
+          <div class="comparison-player"></div>
+        </div>
+      </details>
+    </template>
+  </body>
+</html>

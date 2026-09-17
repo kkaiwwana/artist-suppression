@@ -1,0 +1,278 @@
+{
+  "schema_version": 2,
+  "setup_label": "Inference Setup",
+  "row_columns": [
+    { "id": "specificity_regularizer", "label": "Spec. Reg." }
+  ],
+  "metric_groups": [
+    {
+      "label": "Style Similarity Measures",
+      "metrics": [
+        { "id": "target_aar", "label": "AAR", "decimals": 3 },
+        { "id": "artist_confidence", "label": "Artist Conf.", "decimals": 3 },
+        { "id": "artist_rank", "label": "Artist Rank", "decimals": 3 },
+        { "id": "gt_ntc", "label": "GT-NTC", "decimals": 3 },
+        { "id": "mert", "label": "MERT", "decimals": 3 }
+      ]
+    },
+    {
+      "label": "Generation Quality",
+      "metrics": [
+        { "id": "clap", "label": "CLAP, ↑", "decimals": 3 },
+        { "id": "kl", "label": "KL, ↓", "decimals": 3 },
+        { "id": "fad", "label": "FAD, ↓", "decimals": 3 }
+      ]
+    }
+  ],
+  "sections": [
+    {
+      "id": "references_and_baseline",
+      "rows": [
+        {
+          "id": "gt_reference_within_artist",
+          "label": "G.T. reference (within-artist)",
+          "metadata": { "specificity_regularizer": "—" },
+          "values": {
+            "target_aar": 0.628,
+            "artist_confidence": 0.808,
+            "artist_rank": 1.795,
+            "gt_ntc": null,
+            "mert": 0.790,
+            "clap": 0.463,
+            "kl": 0.837,
+            "fad": 1.814
+          }
+        },
+        {
+          "id": "gt_reference_between_artist",
+          "label": "G.T. reference (between-artist)",
+          "metadata": { "specificity_regularizer": "—" },
+          "values": {
+            "target_aar": null,
+            "artist_confidence": null,
+            "artist_rank": null,
+            "gt_ntc": null,
+            "mert": 0.752,
+            "clap": 0.358,
+            "kl": 1.428,
+            "fad": 8.807
+          }
+        },
+        {
+          "id": "no_control",
+          "label": "No control",
+          "metadata": { "specificity_regularizer": "—" },
+          "values": {
+            "target_aar": 0.422,
+            "artist_confidence": 0.362,
+            "artist_rank": 8.583,
+            "gt_ntc": 0.039,
+            "mert": 0.879,
+            "clap": 0.492,
+            "kl": 0.318,
+            "fad": 1.517
+          }
+        }
+      ]
+    },
+    {
+      "id": "enhance_target",
+      "rows": [
+        {
+          "id": "enhance_target_without_regularizer",
+          "label": "Enhance target",
+          "row_span": 2,
+          "divider_before": true,
+          "metadata": { "specificity_regularizer": "✗" },
+          "values": {
+            "target_aar": 0.635,
+            "artist_confidence": 0.554,
+            "artist_rank": 3.920,
+            "gt_ntc": 0.039,
+            "mert": 0.883,
+            "clap": 0.479,
+            "kl": 0.296,
+            "fad": 1.478
+          }
+        },
+        {
+          "id": "enhance_target_with_regularizer",
+          "continuation": true,
+          "metadata": { "specificity_regularizer": "✓" },
+          "values": {
+            "target_aar": 0.604,
+            "artist_confidence": 0.533,
+            "artist_rank": 4.316,
+            "gt_ntc": 0.040,
+            "mert": 0.883,
+            "clap": 0.479,
+            "kl": 0.294,
+            "fad": 1.565
+          }
+        }
+      ]
+    },
+    {
+      "id": "target_suppression",
+      "rows": [
+        {
+          "id": "suppress_target_single_without_regularizer",
+          "label": "Suppress target (single)",
+          "row_span": 2,
+          "divider_before": true,
+          "metadata": { "specificity_regularizer": "✗" },
+          "values": {
+            "target_aar": 0.140,
+            "artist_confidence": 0.119,
+            "artist_rank": 36.411,
+            "gt_ntc": 0.028,
+            "mert": 0.834,
+            "clap": 0.484,
+            "kl": 0.457,
+            "fad": 3.087
+          },
+          "highlights": {
+            "artist_rank": "second",
+            "clap": "second",
+            "kl": "second",
+            "fad": "second"
+          }
+        },
+        {
+          "id": "suppress_target_single_with_regularizer",
+          "continuation": true,
+          "metadata": { "specificity_regularizer": "✓" },
+          "values": {
+            "target_aar": 0.175,
+            "artist_confidence": 0.149,
+            "artist_rank": 26.995,
+            "gt_ntc": 0.031,
+            "mert": 0.848,
+            "clap": 0.493,
+            "kl": 0.401,
+            "fad": 2.316
+          },
+          "highlights": {
+            "clap": "best",
+            "kl": "best",
+            "fad": "best"
+          }
+        },
+        {
+          "id": "suppress_target_multiple_without_regularizer",
+          "label": "Suppress target (multiple)",
+          "row_span": 2,
+          "metadata": { "specificity_regularizer": "✗" },
+          "values": {
+            "target_aar": 0.071,
+            "artist_confidence": 0.062,
+            "artist_rank": 46.992,
+            "gt_ntc": 0.020,
+            "mert": 0.795,
+            "clap": 0.433,
+            "kl": 0.575,
+            "fad": 4.779
+          },
+          "highlights": {
+            "target_aar": "best",
+            "artist_confidence": "best",
+            "artist_rank": "best",
+            "gt_ntc": "best",
+            "mert": "best"
+          }
+        },
+        {
+          "id": "suppress_target_multiple_with_regularizer",
+          "continuation": true,
+          "metadata": { "specificity_regularizer": "✓" },
+          "values": {
+            "target_aar": 0.105,
+            "artist_confidence": 0.092,
+            "artist_rank": 34.593,
+            "gt_ntc": 0.025,
+            "mert": 0.817,
+            "clap": 0.466,
+            "kl": 0.466,
+            "fad": 3.178
+          },
+          "highlights": {
+            "target_aar": "second",
+            "artist_confidence": "second",
+            "gt_ntc": "second",
+            "mert": "second"
+          }
+        }
+      ]
+    },
+    {
+      "id": "non_target_suppression",
+      "rows": [
+        {
+          "id": "suppress_non_target_single_without_regularizer",
+          "label": "Suppress non-target (single)",
+          "row_span": 2,
+          "divider_before": true,
+          "metadata": { "specificity_regularizer": "✗" },
+          "values": {
+            "target_aar": 0.321,
+            "artist_confidence": 0.273,
+            "artist_rank": 13.634,
+            "gt_ntc": 0.033,
+            "mert": 0.854,
+            "clap": 0.478,
+            "kl": 0.361,
+            "fad": 1.988
+          }
+        },
+        {
+          "id": "suppress_non_target_single_with_regularizer",
+          "continuation": true,
+          "metadata": { "specificity_regularizer": "✓" },
+          "values": {
+            "target_aar": 0.361,
+            "artist_confidence": 0.313,
+            "artist_rank": 10.581,
+            "gt_ntc": 0.036,
+            "mert": 0.867,
+            "clap": 0.486,
+            "kl": 0.350,
+            "fad": 1.663
+          }
+        },
+        {
+          "id": "suppress_non_target_multiple_without_regularizer",
+          "label": "Suppress non-target (multiple)",
+          "row_span": 2,
+          "metadata": { "specificity_regularizer": "✗" },
+          "values": {
+            "target_aar": 0.169,
+            "artist_confidence": 0.143,
+            "artist_rank": 24.109,
+            "gt_ntc": 0.023,
+            "mert": 0.811,
+            "clap": 0.434,
+            "kl": 0.503,
+            "fad": 3.730
+          }
+        },
+        {
+          "id": "suppress_non_target_multiple_with_regularizer",
+          "continuation": true,
+          "metadata": { "specificity_regularizer": "✓" },
+          "values": {
+            "target_aar": 0.268,
+            "artist_confidence": 0.227,
+            "artist_rank": 16.389,
+            "gt_ntc": 0.029,
+            "mert": 0.840,
+            "clap": 0.469,
+            "kl": 0.411,
+            "fad": 2.284
+          }
+        }
+      ]
+    }
+  ],
+  "caption_label": "Table 1.",
+  "caption": "Quantitative results at two regularization operating points. ✗ uses the primary control objectives only, whereas ✓ additionally employs the condition-specificity regularizer. Target rows measure suppression efficacy; non-target rows characterize off-target control behavior. For the ground-truth reference, CLAP, KL and FAD are reported within- and between-artist. Bold values indicate the absolute best metric across the target suppression configurations, while underlined values denote the second-best."
+}

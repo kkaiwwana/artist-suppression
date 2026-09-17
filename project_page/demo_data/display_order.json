@@ -1,0 +1,34 @@
+{
+  "_instructions": "Move complete sample lines to reorder; set show to false to hide one. New samples are appended when include_unlisted_samples is true. Suppress Others is controlled by the switch on the page.",
+  "include_unlisted_samples": true,
+  "single": [
+    {"sample_index": 221, "show": true, "title": "FREE BGM for Dojin Animation Films"},
+    {"sample_index": 396, "show": true, "title": "Flower Garden Ball (Jerome-Schwartz)"},
+    {"sample_index": 193, "show": true, "title": "Reflections In The Morning #1"},
+    {"sample_index": 203, "show": true, "title": "Music For Streaming Expectations"},
+    {"sample_index": 215, "show": true, "title": "Music For Being Now Here"},
+    {"sample_index": 716, "show": true, "title": "I Feel Great"},
+    {"sample_index": 515, "show": true, "title": "10. Years Go By"},
+    {"sample_index": 204, "show": true, "title": "Music For The Dawn"},
+    {"sample_index": 1438, "show": true, "title": "Reflections In The Morning #1"},
+    {"sample_index": 7, "show": true, "title": "Keep it in your heart"},
+    {"sample_index": 1740, "show": true, "title": "I Feel Great (Loop)"},
+    {"sample_index": 29, "show": true, "title": "Playing with the wind - Igor Lisul"},
+    {"sample_index": 1414, "show": true, "title": "jingle For The Distance"},
+    {"sample_index": 1408, "show": true, "title": "Music For Relaxing and  Jogging"},
+    {"sample_index": 1752, "show": true, "title": "I Feel Great (Loop)"},
+    {"sample_index": 223, "show": true, "title": "Daitarn viaggia veloce sul treno e arriva a Sharm El Sheik"}
+  ],
+  "multiple": [
+    {"sample_index": 454, "show": true, "title": "Corporate Modern Technlogy"},
+    {"sample_index": 726, "show": true, "title": "I Feel Great (Loop)"},
+    {"sample_index": 403, "show": true, "title": "Humoresque Rag (C.F.Gall)"},
+    {"sample_index": 994, "show": true, "title": "7-8-23~a"},
+    {"sample_index": 719, "show": true, "title": "Joyful New Day"},
+    {"sample_index": 453, "show": true, "title": "Corporate Ambient Background Short Version"},
+    {"sample_index": 873, "show": true, "title": "10 Derriere Toi"},
+    {"sample_index": 671, "show": true, "title": "Spaceship (instrumental)"},
+    {"sample_index": 803, "show": true, "title": "Rune X - the forgotten Path..."},
+    {"sample_index": 1422, "show": true, "title": "Song For Melting Into One"}
+  ]
+}
