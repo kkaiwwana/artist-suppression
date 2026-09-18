@@ -226,7 +226,8 @@ h2 {
 .summary-icon::after { transform: rotate(90deg); }
 .sample-card[open] .summary-icon::after { transform: none; }
 .sample-body { padding: 3px 20px 24px 77px; }
-.sample-caption { max-width: 850px; margin: 0 0 18px; color: var(--muted); font-size: 0.82rem; }
+.sample-caption { max-width: 850px; margin: 0 0 18px; color: var(--muted); font-size: 0.82rem; line-height: 1.65; }
+.sample-caption strong { color: var(--ink); }
 
 .comparison-player { border: 1px solid var(--line); border-radius: 4px; background: white; }
 .player-section + .player-section { border-top: 1px solid var(--line); }

@@ -785,7 +785,7 @@ function buildSampleCard(item, indexWithinGroup, autoOpen = false) {
   card.querySelector(".sample-title").textContent = item.source_title;
   card.querySelector(".sample-artist").textContent = item.artist;
   card.querySelector(".sample-duration").textContent = formatRange(item);
-  card.querySelector(".sample-caption").textContent = item.caption;
+  card.querySelector(".sample-prompt-text").textContent = item.caption;
   let player = null;
   const ensurePlayer = () => {
     if (!player) {

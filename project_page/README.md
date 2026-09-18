@@ -22,7 +22,7 @@ page. Before the first deployment, set the repository to public and select
 
 After committing the page and workflow to `ICASSP_27`, follow the **Deploy
 project page** run under the Actions tab. The expected public URL is
-<https://kkaiwwana.github.io/mus-unlearning/>.
+<https://kkaiwwana.github.io/artist-suppression/>.
 
 ## Manage listening examples by hand
 
@@ -41,8 +41,9 @@ required. A minimal template is provided in `manifest.example.json`.
 
 Two manifest layouts are recognized:
 
-1. The original `paper_demo_bundle/manifest.json` layout, using `title` values
-   such as `demo single` and `demo multiple`, plus its existing `audio` mapping.
+1. The original `paper_demo_bundle/manifest.json` layout, using either `title`
+   values such as `demo single` and `demo multiple` or `note` values such as
+   `demo_single` and `demo_multiple`, plus its existing `audio` mapping.
 2. The compact generated layout currently stored here, using an explicit
    `group` and six normalized `variants`.
 

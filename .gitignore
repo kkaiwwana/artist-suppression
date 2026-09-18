@@ -4,6 +4,9 @@ checkpoints
 logs
 outputs
 TestOut
+evaluation_outputs
+tests
+docs
 .idea
 .ipynb_checkpoints
 __pycache__/
@@ -11,10 +14,12 @@ __pycache__/
 *.png
 *.jp[e]g
 *.zip
+*.tar
 *.tar[.gz]
 *.py[cod]
 *.pt
 *.wav
+!project_page/demo_data/audio/**/*.wav
 *.mp4
 *.tar.gz
 
