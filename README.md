@@ -26,9 +26,9 @@ python scripts/convert_subset_to_encodec.py \
 Note: Ideally, the script will makedir `datasets/jamendo_max_caps` in step.1 and download metadata at `jamendo_max_caps/metadata`, then script in step.2 will download the subset at `datasets/jamendo_max_caps/subset/signature_[ARTIST_NUMBER]_[SONG_NUMBER]_[RAMDOM_SEED]` then the encodec will output the data at same directory.
 
 ### Training and Evaluation
-**Step 0** Please configure your wandb (or swanlab; an alternative) api key at `swanlab_api_key.txt / wandb_api_key.txt`; or you can configure it as env varibles. We will use them to track the experiment. Configure your path to the adapter in the `config/runenrs/model/unlearnable_musicgen.yaml`.
+**Step 0** Please configure your wandb (or swanlab; an alternative) api key at `swanlab_api_key.txt / wandb_api_key.txt`; or you can configure it as env varibles. We will use them to track the experiment.
 
-**Step 1.A** Simply finetune MusicGen to adapt to our subset with LoRA adapter with command `python scripts/run.py runner=gen_fintuning exp.cmt=[YOUR_COMMENT_HERE]`. We only apply a very light 1-epoch-training, and please check the path of your checkpoint, which can be found at dir `logs/[TIMES & DATES]@[YOUR COMMENT]/ckpts`.
+**Step 1.A** Simply finetune MusicGen to adapt to our subset with LoRA adapter with command `python scripts/run.py runner=gen_fintuning exp.cmt=[YOUR_COMMENT_HERE]`. We only apply a very light 1-epoch-training, and please check the path of your checkpoint, which can be found at dir `logs/[TIMES & DATES]@[YOUR COMMENT]/ckpts`. Configure your path to the adapter in the `config/runenrs/model/unlearnable_musicgen.yaml`.
 
 **Step 1.B** Indepently train a artist classifier with command `python scripts/run.py runner=train_classifieir exp.cmt=[YOUR_COMMENT_HERE]`. Again, copy the checkpoint path and configure it at `config/runners/condition_learning.yaml`.
 
