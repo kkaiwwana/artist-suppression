@@ -36,5 +36,10 @@ Note: Ideally, the script will makedir `datasets/jamendo_max_caps` in step.1 and
 
 ## Citation
 ```
-bib will be available on our paper release!
+@article{wang2026suppression,
+  title  = {Learning Post-Hoc Artist Controls For Artist Suppression In Audio Music Generation},
+  author = {Wang, Kai and Shi, Sunyou and Wu, Yuxiang and Li, Shengchen and de Berardinis, Jacopo},
+  year   = {2026},
+  note   = {Under review}
+}
 ```
