@@ -74,7 +74,7 @@ model_cfg:
     # Only one controlled branch keeps an autograd graph on each optimizer
     # step. This preserves roughly one-forward activation memory while cycling
     # through the complete objective.
-    branch_cycle: [positive, positive, negative, positive, preservation]
+    branch_cycle: [positive]
     # The frozen default branch is a reference/monitor. Set this above zero
     # only when train_generator=true and deliberate base adaptation is desired.
     default_weight: 0.0
