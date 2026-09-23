@@ -1,5 +1,7 @@
 # Learning Post-hoc Controls For Artist Suppression
 
+[Supplementary material (PDF)](assets/doc/supplementary.pdf)
+
 ## Quick Start
 ### Dataset Preparation
 **Step 1** Download metadata from HF with `python scripts/download_metadata.py`.
