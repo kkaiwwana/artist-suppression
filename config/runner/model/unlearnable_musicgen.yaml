@@ -117,7 +117,7 @@ model_cfg:
       weight: 1.0
       # Allow a small teacher-forced CE change while suppressing non-target
       # artists, and optimize only degradation beyond this finite margin.
-      margin: 0.15
+      margin: 0.03
 
   losses:
     style_bank_l2_weight: 0.0
